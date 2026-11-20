@@ -9,7 +9,7 @@ a = Analysis(
     [str(ROOT / "src" / "ceres" / "main.py")],
     pathex=[str(ROOT / "src")],
     binaries=[],
-    datas=[],
+    datas=[(str(ROOT / "assets"), "assets")],
     hiddenimports=[
         "openvino",
         "openvino_genai",
@@ -36,6 +36,7 @@ exe = EXE(
     strip=False,
     upx=False,
     console=False,
+    icon=str(ROOT / "assets" / "ceres.ico"),
 )
 
 coll = COLLECT(

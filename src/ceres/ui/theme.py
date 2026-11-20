@@ -5,6 +5,8 @@ from __future__ import annotations
 from PySide6.QtCore import QRectF, Qt
 from PySide6.QtGui import QColor, QIcon, QPainter, QPen, QPixmap
 
+from ceres import APP_ICON_ICO, APP_ICON_PNG
+
 APP_QSS = """
 QMainWindow, QWidget#CentralRoot {
     background-color: #0D1117;
@@ -236,8 +238,44 @@ QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
 """
 
 
+def get_app_qicon() -> QIcon:
+    """Return the multi-resolution Windows ICO / PNG icon for window and taskbar."""
+    if APP_ICON_ICO.exists():
+        icon = QIcon(str(APP_ICON_ICO))
+        if not icon.isNull():
+            return icon
+    if APP_ICON_PNG.exists():
+        icon = QIcon(str(APP_ICON_PNG))
+        if not icon.isNull():
+            return icon
+    return create_mic_qicon("idle")
+
+
 def create_mic_qicon(state: str = "idle") -> QIcon:
-    """Draw a sharp vector microphone icon onto a 64x64 QPixmap for tray and window icons."""
+    """Return the branded tray icon with a live status dot, or vector fallback if asset missing."""
+    if APP_ICON_PNG.exists():
+        base = QPixmap(str(APP_ICON_PNG))
+        if not base.isNull():
+            pixmap = base.scaled(
+                64,
+                64,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+            badge_hex = {
+                "listening": "#22C55E",
+                "busy": "#F59E0B",
+                "error": "#EF4444",
+            }.get(state)
+            if badge_hex:
+                painter = QPainter(pixmap)
+                painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+                painter.setBrush(QColor(badge_hex))
+                painter.setPen(QPen(QColor("#0F172A"), 3.0))
+                painter.drawEllipse(QRectF(40, 40, 20, 20))
+                painter.end()
+            return QIcon(pixmap)
+
     bg_hex, ring_hex = {
         "idle": ("#1E293B", "#38BDF8"),
         "listening": ("#16A34A", "#86EFAC"),

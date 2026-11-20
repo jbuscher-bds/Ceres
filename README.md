@@ -1,3 +1,7 @@
+<p align="left">
+  <img src="assets/ceres.png" width="84" alt="Ceres App Icon" />
+</p>
+
 # Ceres — Local Intel AI Boost NPU Voice Dictation & Editing Suite
 
 [![Windows CI](https://github.com/jbuscher-bds/Ceres/actions/workflows/ci.yml/badge.svg)](https://github.com/jbuscher-bds/Ceres/actions/workflows/ci.yml)
@@ -90,7 +94,7 @@ Measured locally on **Intel Core Ultra 7 258V** (32 GB LPDDR5x, **Intel AI Boost
 ```powershell
 git clone https://github.com/jbuscher-bds/Ceres.git
 cd Ceres
-.\setup.ps1
+powershell -ExecutionPolicy Bypass -File .\setup.ps1
 ```
 
 ### Launch

@@ -29,7 +29,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ceres import MODELS_DIR, PROJECT_ROOT, __version__
+from ceres import APP_ICON_ICO, MODELS_DIR, PROJECT_ROOT, __version__
 from ceres.config import ConfigManager
 from ceres.engine.model_manager import LLM_CATALOG, WHISPER_CATALOG
 from ceres.engine.pipeline import DictationController, PipelineEvent
@@ -39,7 +39,7 @@ from ceres.system.autostart import set_autostart_enabled
 from ceres.system.hotkey import GlobalHotkeyManager, format_hotkey_display
 from ceres.system.injector import set_clipboard_text
 from ceres.ui.overlay_pill import FloatingMicPill
-from ceres.ui.theme import APP_QSS, create_mic_qicon
+from ceres.ui.theme import APP_QSS, get_app_qicon
 from ceres.ui.tray import TrayManager
 
 logger = logging.getLogger(__name__)
@@ -60,7 +60,7 @@ class CeresWindow(QMainWindow):
     def __init__(self, *, minimized: bool = False, skip_model_load: bool = False) -> None:
         super().__init__()
         self.setWindowTitle(f"Ceres {__version__} — Intel AI Boost NPU Voice Dictation")
-        self.setWindowIcon(create_mic_qicon("idle"))
+        self.setWindowIcon(get_app_qicon())
         self.resize(960, 720)
         self.setMinimumSize(780, 580)
         self.setStyleSheet(APP_QSS)
@@ -797,12 +797,14 @@ class CeresWindow(QMainWindow):
     def _create_desktop_shortcut(self) -> None:
         vbs_path = Path(PROJECT_ROOT) / "launch_ceres.vbs"
         desktop_lnk = Path.home() / "Desktop" / "Ceres.lnk"
+        icon_line = f"$sc.IconLocation = '{APP_ICON_ICO}'; " if APP_ICON_ICO.exists() else ""
         ps_script = (
             "$ws = New-Object -ComObject WScript.Shell; "
             f"$sc = $ws.CreateShortcut('{desktop_lnk}'); "
             "$sc.TargetPath = 'wscript.exe'; "
             f"$sc.Arguments = '\"{vbs_path}\"'; "
             f"$sc.WorkingDirectory = '{PROJECT_ROOT}'; "
+            f"{icon_line}"
             "$sc.Description = 'Ceres — Local Intel NPU Voice Dictation'; "
             "$sc.Save()"
         )

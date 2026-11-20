@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import ctypes
 import ctypes.wintypes as wintypes
 import logging
@@ -56,10 +57,16 @@ def _create_qt_app() -> object:
     from PySide6.QtCore import Qt
     from PySide6.QtWidgets import QApplication
 
+    from ceres.ui.theme import get_app_qicon
+
+    with contextlib.suppress(Exception):
+        ctypes.WinDLL("shell32").SetCurrentProcessExplicitAppUserModelID("jbuscher-bds.Ceres.Desktop")
+
     QApplication.setHighDpiScaleFactorRoundingPolicy(Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
     app.setApplicationName("Ceres")
+    app.setWindowIcon(get_app_qicon())
     return app
 
 
