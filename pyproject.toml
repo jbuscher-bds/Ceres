@@ -1,0 +1,80 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ceres"
+version = "0.2.0"
+description = "100% local Windows voice dictation, rewriting, and voice-editing app accelerated by Intel AI Boost NPU & Arc GPU"
+readme = "README.md"
+license = { text = "MIT" }
+authors = [{ name = "Johannes Buscher" }]
+requires-python = ">=3.12"
+keywords = [
+    "voice-dictation",
+    "speech-to-text",
+    "openvino",
+    "intel-npu",
+    "whisper",
+    "qwen3",
+    "pyside6",
+    "windows",
+    "edge-ai",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Win32 (MS Windows)",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: Microsoft :: Windows",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Multimedia :: Sound/Audio :: Speech",
+]
+dependencies = [
+    "openvino>=2026.0",
+    "openvino-tokenizers>=2026.0",
+    "openvino-genai>=2026.0",
+    "huggingface_hub>=0.25",
+    "numpy>=2.0",
+    "sounddevice>=0.5",
+    "cffi>=1.17",
+    "PySide6-Essentials>=6.10",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.8",
+    "mypy>=1.14",
+]
+
+[project.urls]
+Homepage = "https://github.com/jbuscher-bds/Ceres"
+Repository = "https://github.com/jbuscher-bds/Ceres"
+Issues = "https://github.com/jbuscher-bds/Ceres/issues"
+
+[project.scripts]
+ceres = "ceres.main:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+[tool.ruff]
+line-length = 110
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+ignore = ["E501"]
+
+[tool.mypy]
+python_version = "3.12"
+ignore_missing_imports = true
+check_untyped_defs = true
+warn_unused_ignores = true

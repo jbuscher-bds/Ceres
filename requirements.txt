@@ -1,0 +1,11 @@
+openvino>=2026.0
+openvino-tokenizers>=2026.0
+openvino-genai>=2026.0
+huggingface_hub>=0.25
+numpy>=2.0
+sounddevice>=0.5
+cffi>=1.17
+PySide6-Essentials>=6.10
+pytest>=8.0
+ruff>=0.8
+mypy>=1.14
