@@ -12,7 +12,7 @@
 
 **Ceres** is a 100% offline, privacy-first Windows voice dictation, sentence-polishing, and voice-editing desktop application accelerated by **Intel AI Boost NPU** and **Intel Arc iGPU** via OpenVINO GenAI.
 
-Speak naturally anywhere in Windows — in **English, Dutch (*Nederlands*), or German (*Deutsch*)** — and Ceres removes hesitation fillers (*"um"*, *"uh"*, *"eh"*, *"euh"*, *"zeg maar"*, *"äh"*, *"ähm"*), resolves mid-sentence self-corrections, restructures rough speech into fluent prose tailored to the active application, and pastes the result directly at your cursor without sending a single byte to the cloud.
+Speak naturally anywhere in Windows — in **English, Dutch (*Nederlands*), or German (*Deutsch*)** — and Ceres removes hesitation fillers (*"um"*, *"uh"*, *"eh"*, *"euh"*, *"zeg maar"*, *"äh"*, *"ähm"*), resolves mid-sentence self-corrections, restructures rough speech into fluent prose, and pastes the result directly at your cursor without sending a single byte to the cloud.
 
 <!-- Add your demo recording at docs/demo.gif and uncomment:
 ![Ceres Demo](docs/demo.gif)
@@ -28,8 +28,8 @@ Speak naturally anywhere in Windows — in **English, Dutch (*Nederlands*), or G
 - **Smart Hybrid Global Shortcuts**:
   - **Dictate (`Ctrl + Shift + Space`)**: Quick tap (`< 0.35 s`) toggles hands-free recording; hold (`>= 0.35 s`) works as Push-to-Talk; **`Esc`** cancels cleanly.
   - **Voice Edit Mode (`Ctrl + Shift + E`)**: Highlight existing text in any app, press the edit shortcut, speak a command (*"Make this more polite"*, *"Summarize in 3 bullets"*, *"Translate to Dutch"*), and Ceres replaces the selection in place.
-- **App-Aware Formatting & Custom Vocabulary**:
-  - Classifies the foreground window via Win32 (`email`, `chat`, `code`, `document`, `general`) to adapt formatting and preserve technical identifiers, plus user-defined domain terms & acronyms.
+- **Custom Vocabulary**:
+  - Supports user-defined domain terms, names, and acronyms so technical spellings are preserved accurately.
 - **Native Qt 6 HiDPI UI & Non-Activating Pill**:
   - 60 FPS translucent `QPainter` pill overlay styled with Win32 `WS_EX_NOACTIVATE` so keyboard focus stays in your editor/browser, automatically placed on the active monitor and draggable across displays.
 - **Speech-Band Spectral VAD**:
@@ -43,12 +43,10 @@ Speak naturally anywhere in Windows — in **English, Dutch (*Nederlands*), or G
 
 ```mermaid
 flowchart LR
-    HK["Win32 WH_KEYBOARD_LL Hook\nDictate (Ctrl+Shift+Space) / Edit (Ctrl+Shift+E)"] --> CTX["Active Window Context\n(Email / Chat / Code / Doc)"]
-    HK --> CAP["16 kHz Audio Capture\n+ Spectral VAD (180-3800 Hz)"]
+    HK["Win32 WH_KEYBOARD_LL Hook\nDictate (Ctrl+Shift+Space) / Edit (Ctrl+Shift+E)"] --> CAP["16 kHz Audio Capture\n+ Spectral VAD (180-3800 Hz)"]
     CAP --> PILL["Qt 6 Floating Pill\n(WS_EX_NOACTIVATE, 60 FPS)"]
     CAP --> STT["Stage 1: OpenVINO Whisper\n(Arc GPU or Pure NPU)"]
-    CTX --> LLM["Stage 2: Qwen3-8B INT4-CW\n(Intel AI Boost NPU)"]
-    STT --> LLM
+    STT --> LLM["Stage 2: Qwen3-8B INT4-CW\n(Intel AI Boost NPU)"]
     LLM --> INJ["64-bit Win32 Unicode Paste\n(SendInput Ctrl+V + SQLite History)"]
 ```
 

@@ -8,7 +8,6 @@ from ceres.config import ConfigManager
 from ceres.engine.pipeline import DictationController, PipelineEvent
 from ceres.history import HistoryStore
 from ceres.system.audio import SAMPLE_RATE
-from ceres.system.context import ActiveWindowContext
 
 
 class _FakeRecorder:
@@ -66,7 +65,7 @@ def _make_speech_wave() -> np.ndarray:
     return (0.15 * np.sin(2.0 * np.pi * 240.0 * t)).astype(np.float32)
 
 
-def test_pipeline_dictate_and_repolish_mocked(tmp_path: Path, monkeypatch) -> None:
+def test_pipeline_dictate_and_repolish_mocked(tmp_path: Path) -> None:
     cfg_mgr = ConfigManager(tmp_path / "settings.json")
     cfg_mgr.update(play_chime=False, custom_vocabulary=["OpenVINO", "Ceres"])
     hist = HistoryStore(tmp_path / "history.db")
@@ -81,22 +80,15 @@ def test_pipeline_dictate_and_repolish_mocked(tmp_path: Path, monkeypatch) -> No
     fake_injector = _FakeInjector()
     ctrl.injector = fake_injector  # type: ignore[assignment]
 
-    monkeypatch.setattr(
-        "ceres.engine.pipeline.get_active_window_context",
-        lambda: ActiveWindowContext("Code.exe", "main.py", "code"),
-    )
-
     assert ctrl.start_listening("dictate") is True
     audio, dur = ctrl.recorder.stop()
-    ctrl._process_audio(audio, dur, "dictate", None, None, ActiveWindowContext("Code.exe", "main.py", "code"))
+    ctrl._process_audio(audio, dur, "dictate", None, None)
 
     assert fake_injector.injected[-1][0] == "Can we meet tomorrow?"
-    assert fake_rewriter.last_rewrite_kwargs["app_context"] == "code"
     assert fake_rewriter.last_rewrite_kwargs["vocabulary"] == ["OpenVINO", "Ceres"]
 
     recent = hist.list_recent()
     assert len(recent) == 1
-    assert recent[0].app_context == "code"
     assert recent[0].action_type == "dictate"
 
     repolished = ctrl.repolish_entry(recent[0], "light")
@@ -104,7 +96,7 @@ def test_pipeline_dictate_and_repolish_mocked(tmp_path: Path, monkeypatch) -> No
     assert len(hist.list_recent()) == 2
 
 
-def test_pipeline_voice_edit_mode_requires_selection_and_edits(tmp_path: Path, monkeypatch) -> None:
+def test_pipeline_voice_edit_mode_requires_selection_and_edits(tmp_path: Path) -> None:
     cfg_mgr = ConfigManager(tmp_path / "settings.json")
     cfg_mgr.update(play_chime=False)
     hist = HistoryStore(tmp_path / "history.db")
@@ -119,11 +111,6 @@ def test_pipeline_voice_edit_mode_requires_selection_and_edits(tmp_path: Path, m
     fake_injector = _FakeInjector(selected_text=None)
     ctrl.injector = fake_injector  # type: ignore[assignment]
 
-    monkeypatch.setattr(
-        "ceres.engine.pipeline.get_active_window_context",
-        lambda: ActiveWindowContext("OUTLOOK.EXE", "Re: Quote", "email"),
-    )
-
     # Empty selection fails safely without starting recorder
     assert ctrl.start_listening("edit") is False
     assert events[-1].state == "error"
@@ -137,7 +124,6 @@ def test_pipeline_voice_edit_mode_requires_selection_and_edits(tmp_path: Path, m
         "edit",
         "Hey send it asap",
         "prior_clip",
-        ActiveWindowContext("OUTLOOK.EXE", "Re: Quote", "email"),
     )
 
     assert fake_rewriter.last_edit_args == ("Hey send it asap", "um can we meet tomorrow")

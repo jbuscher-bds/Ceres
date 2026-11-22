@@ -25,7 +25,6 @@ class HistoryEntry:
     stt_ms: int
     llm_ms: int
     device_summary: str
-    app_context: str = "general"
     action_type: str = "dictate"
 
 
@@ -58,14 +57,11 @@ class HistoryStore:
                     stt_ms INTEGER NOT NULL,
                     llm_ms INTEGER NOT NULL,
                     device_summary TEXT NOT NULL,
-                    app_context TEXT NOT NULL DEFAULT 'general',
                     action_type TEXT NOT NULL DEFAULT 'dictate'
                 )
                 """
             )
             cols = {str(r["name"]) for r in conn.execute("PRAGMA table_info(history)").fetchall()}
-            if "app_context" not in cols:
-                conn.execute("ALTER TABLE history ADD COLUMN app_context TEXT NOT NULL DEFAULT 'general'")
             if "action_type" not in cols:
                 conn.execute("ALTER TABLE history ADD COLUMN action_type TEXT NOT NULL DEFAULT 'dictate'")
             conn.commit()
@@ -83,7 +79,6 @@ class HistoryStore:
             stt_ms=int(row["stt_ms"]),
             llm_ms=int(row["llm_ms"]),
             device_summary=str(row["device_summary"]),
-            app_context=str(row["app_context"] or "general"),
             action_type=str(row["action_type"] or "dictate"),
         )
 
@@ -98,7 +93,6 @@ class HistoryStore:
         stt_ms: int,
         llm_ms: int,
         device_summary: str,
-        app_context: str = "general",
         action_type: str = "dictate",
         created_at: str | None = None,
     ) -> HistoryEntry:
@@ -109,8 +103,8 @@ class HistoryStore:
                 """
                 INSERT INTO history (
                     created_at, language, rewrite_mode, raw_text, polished_text,
-                    audio_seconds, stt_ms, llm_ms, device_summary, app_context, action_type
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    audio_seconds, stt_ms, llm_ms, device_summary, action_type
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     timestamp,
@@ -122,7 +116,6 @@ class HistoryStore:
                     int(stt_ms),
                     int(llm_ms),
                     device_summary,
-                    app_context,
                     action_type,
                 ),
             )
@@ -140,7 +133,6 @@ class HistoryStore:
             stt_ms=int(stt_ms),
             llm_ms=int(llm_ms),
             device_summary=device_summary,
-            app_context=app_context,
             action_type=action_type,
         )
 
@@ -150,7 +142,7 @@ class HistoryStore:
             rows = conn.execute(
                 """
                 SELECT id, created_at, language, rewrite_mode, raw_text, polished_text,
-                       audio_seconds, stt_ms, llm_ms, device_summary, app_context, action_type
+                       audio_seconds, stt_ms, llm_ms, device_summary, action_type
                 FROM history
                 ORDER BY id DESC
                 LIMIT ?
@@ -160,7 +152,7 @@ class HistoryStore:
         return [self._row_to_entry(row) for row in rows]
 
     def search(self, query: str, limit: int = 50) -> list[HistoryEntry]:
-        """Filter history entries matching `query` across text, language, context, or action."""
+        """Filter history entries matching `query` across text, language, or action."""
         needle = query.strip()
         if not needle:
             return self.list_recent(limit=limit)
@@ -169,17 +161,16 @@ class HistoryStore:
             rows = conn.execute(
                 """
                 SELECT id, created_at, language, rewrite_mode, raw_text, polished_text,
-                       audio_seconds, stt_ms, llm_ms, device_summary, app_context, action_type
+                       audio_seconds, stt_ms, llm_ms, device_summary, action_type
                 FROM history
                 WHERE polished_text LIKE ?
                    OR raw_text LIKE ?
                    OR language LIKE ?
-                   OR app_context LIKE ?
                    OR action_type LIKE ?
                 ORDER BY id DESC
                 LIMIT ?
                 """,
-                (pattern, pattern, pattern, pattern, pattern, max(1, int(limit))),
+                (pattern, pattern, pattern, pattern, max(1, int(limit))),
             ).fetchall()
         return [self._row_to_entry(row) for row in rows]
 
@@ -207,7 +198,7 @@ def export_markdown(entries: list[HistoryEntry], out_path: Path) -> Path:
         for entry in entries:
             ts = entry.created_at.replace("T", " ")[:19]
             lines.append(
-                f"## {ts} — `{entry.action_type.upper()}` · `{entry.language.upper()}` · `{entry.app_context}` · `{entry.rewrite_mode}`"
+                f"## {ts} — `{entry.action_type.upper()}` · `{entry.language.upper()}` · `{entry.rewrite_mode}`"
             )
             lines.append("")
             lines.append(entry.polished_text)

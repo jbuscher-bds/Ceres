@@ -11,7 +11,7 @@ import struct
 import threading
 import time
 import wave
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from typing import Any
 
 import numpy as np
@@ -80,31 +80,150 @@ def play_cue(kind: str) -> None:
     threading.Thread(target=_play, daemon=True).start()
 
 
-def list_input_devices() -> list[dict]:
-    """Return available microphone input devices."""
-    devices: list[dict] = []
+_VIRTUAL_INPUT_PREFIXES = (
+    "microsoft soundmapper",
+    "microsoft sound mapper",
+    "primary sound capture driver",
+    "primärer soundaufnahmetreiber",
+    "primaire geluidsopnamestuurprogramma",
+)
+
+
+def _hostapi_priority(hostapi_name: str) -> int:
+    """Rank PortAudio host APIs from cleanest/most modern to lowest priority."""
+    lowered = hostapi_name.strip().lower()
+    if "wasapi" in lowered:
+        return 0
+    if "directsound" in lowered:
+        return 1
+    if "mme" in lowered:
+        return 2
+    if "wdm-ks" in lowered:
+        return 4
+    return 3
+
+
+def filter_input_devices(
+    all_devices: Sequence[dict[str, Any]],
+    hostapis: Sequence[dict[str, Any]],
+    default_device: int | None = None,
+) -> list[dict[str, Any]]:
+    """
+    Deduplicate physical microphone endpoints across Windows Host APIs.
+
+    Filters out virtual Windows mapper aliases and low-level WDM-KS kernel pins
+    when higher-level APIs exist, selects the highest-priority host API tier
+    (WASAPI > DirectSound > MME > others > WDM-KS), and deduplicates by normalized
+    device name while preserving default flags.
+    """
+    tiered: dict[int, list[dict[str, Any]]] = {}
+
+    for idx, dev in enumerate(all_devices):
+        max_ch = int(dev.get("max_input_channels", 0))
+        if max_ch <= 0:
+            continue
+
+        raw_name = str(dev.get("name", "")).strip()
+        name = raw_name or f"Input {idx}"
+        lower_name = name.lower()
+        if any(lower_name.startswith(prefix) for prefix in _VIRTUAL_INPUT_PREFIXES):
+            continue
+
+        hostapi_name = ""
+        hostapi_default_in: int | None = None
+        raw_ha_idx = dev.get("hostapi")
+        if isinstance(raw_ha_idx, int) and 0 <= raw_ha_idx < len(hostapis):
+            ha = hostapis[raw_ha_idx]
+            hostapi_name = str(ha.get("name", "")).strip()
+            ha_def = ha.get("default_input_device", -1)
+            if isinstance(ha_def, int) and ha_def >= 0:
+                hostapi_default_in = ha_def
+
+        is_default = (default_device is not None and idx == default_device) or (
+            hostapi_default_in is not None and idx == hostapi_default_in
+        )
+        priority = _hostapi_priority(hostapi_name)
+        tiered.setdefault(priority, []).append(
+            {
+                "index": idx,
+                "name": name,
+                "channels": max_ch,
+                "default": is_default,
+                "hostapi": hostapi_name,
+            }
+        )
+
+    if not tiered:
+        return []
+
+    best_tier = tiered[min(tiered)]
+    deduped: list[dict[str, Any]] = []
+    seen_by_name: dict[str, int] = {}
+    for entry in best_tier:
+        norm_name = " ".join(str(entry["name"]).lower().split())
+        if norm_name in seen_by_name:
+            existing = deduped[seen_by_name[norm_name]]
+            if entry["default"]:
+                existing["default"] = True
+            continue
+        seen_by_name[norm_name] = len(deduped)
+        deduped.append(entry)
+
+    return deduped
+
+
+def _default_input_device_index() -> int | None:
+    """Safely read PortAudio's default input device index."""
     if sd is None:
-        return devices
+        return None
+    try:
+        raw_default = sd.default.device
+        raw_in = (
+            raw_default[0]
+            if hasattr(raw_default, "__getitem__") and not isinstance(raw_default, (str, bytes))
+            else raw_default
+        )
+        if raw_in is None:
+            return None
+        idx = int(raw_in)
+        return idx if idx >= 0 else None
+    except Exception:
+        return None
+
+
+def _extra_settings_for_device(device: int | None) -> Any:
+    """Return `WasapiSettings(auto_convert=True)` when recording via WASAPI."""
+    if sd is None or not hasattr(sd, "WasapiSettings"):
+        return None
+    try:
+        dev_idx = device if device is not None else _default_input_device_index()
+        if dev_idx is None or int(dev_idx) < 0:
+            return None
+        dev_info = sd.query_devices(int(dev_idx))
+        hostapi_idx = dev_info.get("hostapi") if isinstance(dev_info, dict) else None
+        if hostapi_idx is None:
+            return None
+        ha_info = sd.query_hostapis(int(hostapi_idx))
+        ha_name = str(ha_info.get("name", "")) if isinstance(ha_info, dict) else ""
+        if "wasapi" in ha_name.lower():
+            return sd.WasapiSettings(auto_convert=True)
+    except Exception:
+        return None
+    return None
+
+
+def list_input_devices() -> list[dict]:
+    """Return available deduplicated microphone input devices."""
+    if sd is None:
+        return []
     try:
         all_devs = sd.query_devices()
-        default_in = (
-            sd.default.device[0] if isinstance(sd.default.device, (list, tuple)) else sd.default.device
-        )
-        for idx, dev in enumerate(all_devs):
-            max_ch = int(dev.get("max_input_channels", 0))
-            if max_ch <= 0:
-                continue
-            devices.append(
-                {
-                    "index": idx,
-                    "name": str(dev.get("name", f"Input {idx}")),
-                    "channels": max_ch,
-                    "default": idx == default_in,
-                }
-            )
+        hostapis = sd.query_hostapis()
+        default_in = _default_input_device_index()
+        return filter_input_devices(list(all_devs), list(hostapis), default_device=default_in)
     except Exception as exc:
         logger.warning("Failed to list audio input devices: %s", exc)
-    return devices
+    return []
 
 
 def trim_silence(
@@ -370,14 +489,18 @@ class AudioRecorder:
 
             if sd is not None:
                 try:
-                    stream = sd.InputStream(
-                        samplerate=SAMPLE_RATE,
-                        channels=1,
-                        dtype="float32",
-                        blocksize=512,
-                        device=device,
-                        callback=self._sd_callback,
-                    )
+                    stream_kwargs: dict[str, Any] = {
+                        "samplerate": SAMPLE_RATE,
+                        "channels": 1,
+                        "dtype": "float32",
+                        "blocksize": 512,
+                        "device": device,
+                        "callback": self._sd_callback,
+                    }
+                    extra_settings = _extra_settings_for_device(device)
+                    if extra_settings is not None:
+                        stream_kwargs["extra_settings"] = extra_settings
+                    stream = sd.InputStream(**stream_kwargs)
                     stream.start()
                     self._stream = stream
                     self._recording = True

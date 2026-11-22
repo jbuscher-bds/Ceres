@@ -7,7 +7,6 @@ All notable changes to **Ceres** are documented in this file.
 ### Added
 - **Native Qt 6 (PySide6) HiDPI UI**: Replaced CustomTkinter + pystray with native Qt 6 widgets, vector `QSystemTrayIcon`, and a smooth 60 FPS translucent `QPainter` pill overlay (`360x58` DIPs) that scales cleanly on 14" HiDPI displays and follows the active foreground monitor.
 - **Voice Edit Mode (`Ctrl + Shift + E`)**: Highlight text in any app, press the edit shortcut, speak a command (summarize, translate, adjust tone), and replace the selection via NPU `Qwen3-8B`.
-- **App-Aware Context Styling**: Detects the active foreground application (`email`, `chat`, `code`, `document`, `general`) via Win32 APIs and tunes formatting accordingly.
 - **Custom Vocabulary**: User-defined domain terms, names, and acronyms injected into the NPU rewriting prompt.
 - **Speech-Band Spectral VAD**: Rejects low-frequency fan rumble and mains hum (<180 Hz) in addition to broadband RMS gating.
 - **History Search, Markdown Export & Re-polish**: Live search bar, Markdown export, and one-click re-polishing on saved transcripts.

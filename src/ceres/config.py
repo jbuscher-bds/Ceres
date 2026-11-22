@@ -16,6 +16,7 @@ VALID_TRIGGER_MODES = ("hybrid", "toggle", "hold")
 VALID_REWRITE_MODES = ("fluent", "light", "verbatim")
 VALID_LANGUAGES = ("auto", "en", "nl", "de")
 VALID_DEVICES = ("NPU", "GPU", "CPU")
+VALID_THEMES = ("system", "light", "dark")
 
 DEFAULT_WHISPER_MODEL = "OpenVINO/whisper-large-v3-turbo-int8-ov"
 DEFAULT_LLM_MODEL = "OpenVINO/Qwen3-8B-int4-cw-ov"
@@ -68,10 +69,10 @@ class AppConfig:
     auto_paste: bool = True
     preserve_clipboard: bool = False
     play_chime: bool = True
-    context_aware_style: bool = True
     custom_vocabulary: list[str] = field(default_factory=list)
     start_with_windows: bool = False
     pill_position: list[int] | None = None
+    theme: str = "system"
 
     def normalized(self) -> AppConfig:
         """Return a sanitized copy ensuring all enum-like and structured fields are valid."""
@@ -92,6 +93,8 @@ class AppConfig:
             if isinstance(self.audio_device, int) and not isinstance(self.audio_device, bool)
             else None
         )
+        theme_raw = self.theme.strip().lower() if isinstance(self.theme, str) else "system"
+        theme = theme_raw if theme_raw in VALID_THEMES else "system"
         return AppConfig(
             hotkey=hotkey,
             edit_hotkey=edit_hotkey,
@@ -105,10 +108,10 @@ class AppConfig:
             auto_paste=bool(self.auto_paste),
             preserve_clipboard=bool(self.preserve_clipboard),
             play_chime=bool(self.play_chime),
-            context_aware_style=bool(self.context_aware_style),
             custom_vocabulary=_normalize_vocabulary(self.custom_vocabulary),
             start_with_windows=bool(self.start_with_windows),
             pill_position=_normalize_pill_position(self.pill_position),
+            theme=theme,
         )
 
 

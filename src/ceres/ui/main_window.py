@@ -1,22 +1,25 @@
-"""Native PySide6 (Qt 6) HiDPI dashboard, History & Voice Edit UI, and Settings."""
+"""Windows 11 Fluent / WinUI 3 PySide6 interface with automatic Light/Dark theme sync."""
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
+import re
 import subprocess
+import threading
 from pathlib import Path
 
 from PySide6.QtCore import QObject, Qt, Signal
+from PySide6.QtGui import QFont, QGuiApplication, QPixmap, QShowEvent
 from PySide6.QtWidgets import (
     QApplication,
     QButtonGroup,
-    QCheckBox,
-    QComboBox,
     QFileDialog,
     QFrame,
     QHBoxLayout,
     QLabel,
+    QLayout,
     QLineEdit,
     QMainWindow,
     QMessageBox,
@@ -24,12 +27,12 @@ from PySide6.QtWidgets import (
     QProgressBar,
     QPushButton,
     QScrollArea,
-    QTabWidget,
+    QStackedWidget,
     QVBoxLayout,
     QWidget,
 )
 
-from ceres import APP_ICON_ICO, MODELS_DIR, PROJECT_ROOT, __version__
+from ceres import APP_ICON_ICO, APP_ICON_PNG, MODELS_DIR, PROJECT_ROOT, __version__
 from ceres.config import ConfigManager
 from ceres.engine.model_manager import LLM_CATALOG, WHISPER_CATALOG
 from ceres.engine.pipeline import DictationController, PipelineEvent
@@ -39,10 +42,19 @@ from ceres.system.autostart import set_autostart_enabled
 from ceres.system.hotkey import GlobalHotkeyManager, format_hotkey_display
 from ceres.system.injector import set_clipboard_text
 from ceres.ui.overlay_pill import FloatingMicPill
-from ceres.ui.theme import APP_QSS, get_app_qicon
+from ceres.ui.theme import (
+    FLUENT_ICON_FONT,
+    apply_windows_titlebar_style,
+    build_app_qss,
+    get_app_qicon,
+    get_theme_tokens,
+)
 from ceres.ui.tray import TrayManager
+from ceres.ui.widgets import CleanComboBox, FluentNavButton, FluentToggleSwitch
 
 logger = logging.getLogger(__name__)
+
+_BRAND_NOISE_RE = re.compile(r"\((?:R|TM)\)", re.IGNORECASE)
 
 
 class _SignalBridge(QObject):
@@ -55,21 +67,28 @@ class _SignalBridge(QObject):
 
 
 class CeresWindow(QMainWindow):
-    """Main HiDPI Qt 6 window coordinating NPU engines, tray, hotkeys, and pill."""
+    """Main HiDPI Windows 11 Fluent window coordinating NPU engines, tray, hotkeys, and pill."""
 
     def __init__(self, *, minimized: bool = False, skip_model_load: bool = False) -> None:
         super().__init__()
-        self.setWindowTitle(f"Ceres {__version__} — Intel AI Boost NPU Voice Dictation")
+        self.setWindowTitle("Ceres — Local NPU Voice Dictation")
         self.setWindowIcon(get_app_qicon())
-        self.resize(960, 720)
-        self.setMinimumSize(780, 580)
-        self.setStyleSheet(APP_QSS)
+        self.resize(980, 680)
+        self.setMinimumSize(820, 560)
 
         self._closing = False
+        self._dwm_styled = False
         self._capturing_target: str | None = None
+        self._last_pipeline_state = "compiling"
+
+        self._nav_buttons: list[FluentNavButton] = []
+        self._toggle_switches: list[FluentToggleSwitch] = []
+        self._combo_boxes: list[CleanComboBox] = []
+        self._card_icons: list[QLabel] = []
 
         self.config_manager = ConfigManager()
         self.history_store = HistoryStore()
+        self._tokens = get_theme_tokens(self.config_manager.config.theme)
         self._bridge = _SignalBridge(self)
 
         self.controller = DictationController(
@@ -82,6 +101,7 @@ class CeresWindow(QMainWindow):
         self.pill = FloatingMicPill(
             saved_position=self.config_manager.config.pill_position,
             on_position_changed=self._on_pill_position_changed,
+            theme=self._tokens,
         )
 
         cfg = self.config_manager.config
@@ -111,8 +131,12 @@ class CeresWindow(QMainWindow):
         self._bridge.hotkey_cancel.connect(self._handle_hotkey_cancel)
         self._bridge.hotkey_captured.connect(self._finish_hotkey_capture)
 
+        with contextlib.suppress(Exception):
+            QGuiApplication.styleHints().colorSchemeChanged.connect(self._on_system_color_scheme_changed)
+
         self._mic_devices = list_input_devices()
         self._build_ui()
+        self._apply_theme()
         self._sync_ui_from_config()
         self._refresh_history()
 
@@ -125,6 +149,12 @@ class CeresWindow(QMainWindow):
         if not skip_model_load:
             self.controller.ensure_ready_async()
 
+    def showEvent(self, event: QShowEvent) -> None:  # noqa: N802
+        super().showEvent(event)
+        if not self._dwm_styled:
+            self._dwm_styled = True
+            apply_windows_titlebar_style(int(self.winId()), dark=self._tokens.is_dark)
+
     def closeEvent(self, event) -> None:  # noqa: N802, ANN001
         if self._closing:
             event.accept()
@@ -132,55 +162,157 @@ class CeresWindow(QMainWindow):
         event.ignore()
         self.hide()
 
+    def _on_system_color_scheme_changed(self, _scheme: object = None) -> None:
+        if self.config_manager.config.theme == "system":
+            self._apply_theme()
+
+    def _set_theme(self, mode: str) -> None:
+        self.config_manager.update(theme=mode)
+        self._apply_theme()
+        self._sync_ui_from_config()
+
+    def _apply_theme(self) -> None:
+        self._tokens = get_theme_tokens(self.config_manager.config.theme)
+        self.setStyleSheet(build_app_qss(self._tokens))
+        apply_windows_titlebar_style(int(self.winId()), dark=self._tokens.is_dark)
+
+        for nav in self._nav_buttons:
+            nav.set_theme(self._tokens)
+        for sw in self._toggle_switches:
+            sw.set_theme(self._tokens)
+        for cb in self._combo_boxes:
+            cb.set_theme(self._tokens)
+        for icon_lbl in self._card_icons:
+            icon_lbl.setStyleSheet(f"color: {self._tokens.text_secondary};")
+
+        self.pill.set_theme(self._tokens)
+        self._update_status_appearance(self._last_pipeline_state)
+        self._refresh_history()
+
+    def _update_status_appearance(self, state: str) -> None:
+        t = self._tokens
+        color_map = {
+            "ready": t.success,
+            "done": t.success,
+            "listening": t.success,
+            "downloading": t.caution,
+            "compiling": t.caution,
+            "transcribing": t.caution,
+            "rewriting": t.caution,
+            "error": t.error_text,
+        }
+        dot_color = color_map.get(state, t.text_tertiary)
+        self._status_dot.setStyleSheet(f"color: {dot_color}; font-size: 11px;")
+        self._status_label.setStyleSheet(f"color: {t.text_primary}; font-size: 12px;")
+
     def _build_ui(self) -> None:
         root = QWidget()
         root.setObjectName("CentralRoot")
         self.setCentralWidget(root)
-        main_layout = QVBoxLayout(root)
-        main_layout.setContentsMargins(16, 14, 16, 14)
-        main_layout.setSpacing(10)
 
-        # Header Card
-        header = QFrame()
-        header.setObjectName("Card")
-        hdr_layout = QHBoxLayout(header)
-        hdr_layout.setContentsMargins(16, 12, 16, 12)
+        main_layout = QHBoxLayout(root)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setSpacing(0)
 
-        title_col = QVBoxLayout()
-        title_col.setSpacing(2)
-        title_lbl = QLabel(f"Ceres {__version__}")
-        title_lbl.setObjectName("AppTitle")
-        self._hw_badge = QLabel(self._format_hardware_badge())
-        self._hw_badge.setObjectName("HardwareBadge")
-        title_col.addWidget(title_lbl)
-        title_col.addWidget(self._hw_badge)
-        hdr_layout.addLayout(title_col, 1)
+        main_layout.addWidget(self._build_sidebar())
 
-        self._dictate_pill_lbl = QLabel()
-        self._dictate_pill_lbl.setObjectName("ShortcutPill")
-        self._edit_pill_lbl = QLabel()
-        self._edit_pill_lbl.setObjectName("ShortcutPill")
-        hdr_layout.addWidget(self._dictate_pill_lbl)
-        hdr_layout.addWidget(self._edit_pill_lbl)
+        self._stack = QStackedWidget()
+        self._stack.addWidget(self._build_history_page())
+        self._stack.addWidget(self._build_voice_page())
+        self._stack.addWidget(self._build_shortcuts_system_page())
+        self._stack.addWidget(self._build_engine_page())
+        main_layout.addWidget(self._stack, 1)
 
+        self._nav_group.idClicked.connect(self._stack.setCurrentIndex)
+
+    def _build_sidebar(self) -> QFrame:
+        sidebar = QFrame()
+        sidebar.setObjectName("Sidebar")
+        sidebar.setFixedWidth(232)
+
+        layout = QVBoxLayout(sidebar)
+        layout.setContentsMargins(16, 18, 12, 16)
+        layout.setSpacing(14)
+
+        # Brand identity row
+        brand_row = QHBoxLayout()
+        brand_row.setSpacing(10)
+        if APP_ICON_PNG.exists():
+            pix = QPixmap(str(APP_ICON_PNG))
+            if not pix.isNull():
+                icon_lbl = QLabel()
+                icon_lbl.setFixedSize(26, 26)
+                icon_lbl.setPixmap(
+                    pix.scaled(
+                        26,
+                        26,
+                        Qt.AspectRatioMode.KeepAspectRatio,
+                        Qt.TransformationMode.SmoothTransformation,
+                    )
+                )
+                brand_row.addWidget(icon_lbl)
+
+        brand_title = QLabel("Ceres")
+        brand_title.setObjectName("BrandTitle")
+        brand_ver = QLabel(f"v{__version__}")
+        brand_ver.setObjectName("BrandVersion")
+        brand_row.addWidget(brand_title)
+        brand_row.addWidget(brand_ver)
+        brand_row.addStretch(1)
+        layout.addLayout(brand_row)
+
+        # Primary dictation CTA & compact shortcut hint
+        cta_box = QVBoxLayout()
+        cta_box.setSpacing(6)
         self._dictate_btn = QPushButton("Start Dictation")
         self._dictate_btn.setObjectName("PrimaryBtn")
-        self._dictate_btn.setMinimumWidth(144)
+        self._dictate_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._dictate_btn.clicked.connect(self._toggle_manual_dictation)
-        hdr_layout.addWidget(self._dictate_btn)
-        main_layout.addWidget(header)
+        cta_box.addWidget(self._dictate_btn)
 
-        # Compact Status & Progress Strip
-        status_card = QFrame()
-        status_card.setObjectName("Card")
-        st_layout = QVBoxLayout(status_card)
-        st_layout.setContentsMargins(14, 9, 14, 9)
+        self._shortcuts_hint = QLabel()
+        self._shortcuts_hint.setObjectName("ShortcutHint")
+        self._shortcuts_hint.setWordWrap(True)
+        cta_box.addWidget(self._shortcuts_hint)
+        layout.addLayout(cta_box)
+
+        # WinUI 3 NavigationView items
+        nav_box = QVBoxLayout()
+        nav_box.setSpacing(2)
+        self._nav_group = QButtonGroup(self)
+        self._nav_group.setExclusive(True)
+        nav_items = (
+            (0, "\ue720", "Dictate & History"),
+            (1, "\ue774", "Voice & Language"),
+            (2, "\ue765", "Shortcuts & System"),
+            (3, "\ue950", "Engine & Models"),
+        )
+        for idx, glyph, caption in nav_items:
+            btn = FluentNavButton(glyph, caption, tokens=self._tokens)
+            if idx == 0:
+                btn.setChecked(True)
+            self._nav_group.addButton(btn, idx)
+            self._nav_buttons.append(btn)
+            nav_box.addWidget(btn)
+        layout.addLayout(nav_box)
+
+        layout.addStretch(1)
+
+        # Quiet bottom status & hardware box
+        status_box = QFrame()
+        status_box.setObjectName("StatusBox")
+        st_layout = QVBoxLayout(status_box)
+        st_layout.setContentsMargins(12, 10, 12, 10)
         st_layout.setSpacing(6)
 
         st_top = QHBoxLayout()
+        st_top.setSpacing(8)
         self._status_dot = QLabel("●")
-        self._status_dot.setStyleSheet("color: #F59E0B; font-size: 14px;")
-        self._status_label = QLabel("Initializing local OpenVINO NPU engines...")
+        self._status_dot.setFixedWidth(12)
+        self._status_dot.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
+
+        self._status_label = QLabel("Initializing local OpenVINO engines...")
+        self._status_label.setWordWrap(True)
         st_top.addWidget(self._status_dot)
         st_top.addWidget(self._status_label, 1)
         st_layout.addLayout(st_top)
@@ -188,61 +320,77 @@ class CeresWindow(QMainWindow):
         self._progress_bar = QProgressBar()
         self._progress_bar.setRange(0, 100)
         self._progress_bar.setValue(5)
+        self._progress_bar.setTextVisible(False)
         st_layout.addWidget(self._progress_bar)
-        main_layout.addWidget(status_card)
 
-        # Tab Widget
-        self._tabs = QTabWidget()
-        self._tabs.addTab(self._build_history_tab(), "Dictate && History")
-        self._tabs.addTab(self._build_settings_tab(), "Settings")
-        main_layout.addWidget(self._tabs, 1)
+        self._hw_badge = QLabel(self._format_hardware_badge())
+        self._hw_badge.setObjectName("HardwareMeta")
+        self._hw_badge.setWordWrap(True)
+        st_layout.addWidget(self._hw_badge)
 
-    def _build_history_tab(self) -> QWidget:
+        layout.addWidget(status_box)
+        return sidebar
+
+    def _build_history_page(self) -> QWidget:
         page = QWidget()
+        page.setObjectName("ScrollContent")
         layout = QVBoxLayout(page)
-        layout.setContentsMargins(14, 14, 14, 14)
-        layout.setSpacing(10)
+        layout.setContentsMargins(28, 24, 28, 24)
+        layout.setSpacing(16)
 
-        # Test Scratchpad Card
-        pad_card = QFrame()
-        pad_card.setObjectName("SubCard")
-        pad_layout = QVBoxLayout(pad_card)
-        pad_layout.setContentsMargins(12, 10, 12, 10)
-        pad_layout.setSpacing(6)
-
-        self._test_pad = QPlainTextEdit()
-        self._test_pad.setFixedHeight(100)
-        self._test_pad.setPlaceholderText(
-            "Click inside and press Ctrl + Shift + Space to dictate in English, Dutch, or German.\n"
-            "Or select any text here, press Ctrl + Shift + E, and speak an edit like 'Make this more polite'."
+        layout.addLayout(
+            self._make_page_header(
+                "Dictate & History",
+                "Dictate into any app using your global shortcut, or test below.",
+            )
         )
 
+        # Scratchpad card
+        pad_card = QFrame()
+        pad_card.setObjectName("Card")
+        pad_layout = QVBoxLayout(pad_card)
+        pad_layout.setContentsMargins(18, 14, 18, 14)
+        pad_layout.setSpacing(8)
+
         pad_hdr = QHBoxLayout()
-        pad_title = QLabel("Quick Test Scratchpad — dictate here or highlight text and press Voice Edit")
-        pad_title.setObjectName("MutedText")
-        clear_pad_btn = QPushButton("Clear Pad")
+        pad_title = QLabel("Scratchpad")
+        pad_title.setObjectName("SectionTitle")
+        clear_pad_btn = QPushButton("Clear")
         clear_pad_btn.setObjectName("SmallBtn")
-        clear_pad_btn.clicked.connect(self._test_pad.clear)
-        pad_hdr.addWidget(pad_title, 1)
+        clear_pad_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        pad_hdr.addWidget(pad_title)
+        pad_hdr.addStretch(1)
         pad_hdr.addWidget(clear_pad_btn)
         pad_layout.addLayout(pad_hdr)
+
+        self._test_pad = QPlainTextEdit()
+        self._test_pad.setFixedHeight(86)
+        self._test_pad.setPlaceholderText(
+            "Click inside and press your Dictate shortcut for English, Dutch, or German.\n"
+            "Or highlight text, press Voice Edit, and speak an instruction such as 'Make this concise'."
+        )
+        clear_pad_btn.clicked.connect(self._test_pad.clear)
         pad_layout.addWidget(self._test_pad)
         layout.addWidget(pad_card)
 
-        # Search & History Controls
+        # History toolbar
         hist_hdr = QHBoxLayout()
-        hist_lbl = QLabel("History")
+        hist_hdr.setSpacing(10)
+        hist_lbl = QLabel("Recent Dictations")
         hist_lbl.setObjectName("SectionTitle")
+
         self._search_input = QLineEdit()
-        self._search_input.setPlaceholderText("Search transcripts, language, or context...")
+        self._search_input.setPlaceholderText("Search transcripts...")
         self._search_input.textChanged.connect(lambda _t: self._refresh_history())
 
-        export_btn = QPushButton("Export Markdown")
+        export_btn = QPushButton("Export .md")
         export_btn.setObjectName("SmallBtn")
+        export_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         export_btn.clicked.connect(self._export_history_markdown)
 
         clear_hist_btn = QPushButton("Clear All")
         clear_hist_btn.setObjectName("SubtleDangerBtn")
+        clear_hist_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         clear_hist_btn.clicked.connect(self._clear_history)
 
         hist_hdr.addWidget(hist_lbl)
@@ -251,10 +399,11 @@ class CeresWindow(QMainWindow):
         hist_hdr.addWidget(clear_hist_btn)
         layout.addLayout(hist_hdr)
 
-        # Scrollable History Cards
+        # Scrollable History Feed
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         self._history_container = QWidget()
+        self._history_container.setObjectName("ScrollContent")
         self._history_layout = QVBoxLayout(self._history_container)
         self._history_layout.setContentsMargins(0, 0, 6, 0)
         self._history_layout.setSpacing(8)
@@ -263,186 +412,405 @@ class CeresWindow(QMainWindow):
         layout.addWidget(scroll, 1)
         return page
 
-    def _build_settings_tab(self) -> QWidget:
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        inner = QWidget()
-        layout = QVBoxLayout(inner)
-        layout.setContentsMargins(14, 14, 14, 14)
-        layout.setSpacing(10)
-
-        # 1. Shortcuts & Trigger
-        sec1 = self._make_section(layout, "Keyboard Shortcuts && Trigger")
-        row_hk = QHBoxLayout()
-        row_hk.addWidget(self._field_label("Dictation Shortcut:"))
-        self._hk_record_btn = QPushButton()
-        self._hk_record_btn.setMinimumWidth(210)
-        self._hk_record_btn.clicked.connect(lambda: self._start_hotkey_capture("dictate"))
-        row_hk.addWidget(self._hk_record_btn)
-        hint1 = QLabel("Click and press keys (Esc cancels)")
-        hint1.setObjectName("MutedText")
-        row_hk.addWidget(hint1, 1)
-        sec1.addLayout(row_hk)
-
-        row_edit_hk = QHBoxLayout()
-        row_edit_hk.addWidget(self._field_label("Voice Edit Shortcut:"))
-        self._edit_hk_btn = QPushButton()
-        self._edit_hk_btn.setMinimumWidth(210)
-        self._edit_hk_btn.clicked.connect(lambda: self._start_hotkey_capture("edit"))
-        row_edit_hk.addWidget(self._edit_hk_btn)
-        hint2 = QLabel("Select text, press shortcut, speak edit command")
-        hint2.setObjectName("MutedText")
-        row_edit_hk.addWidget(hint2, 1)
-        sec1.addLayout(row_edit_hk)
-
-        self._trigger_group, row_trig = self._make_segmented_row(
-            "Trigger Behavior:",
-            [("hybrid", "Hybrid (Tap / Hold)"), ("toggle", "Toggle Only"), ("hold", "Hold Only")],
-            self._on_trigger_selected,
+    def _build_voice_page(self) -> QWidget:
+        scroll, layout = self._make_scrollable_page(
+            "Voice & Language",
+            "Configure rewrite style, supported languages, and domain vocabulary.",
         )
-        sec1.addLayout(row_trig)
 
-        # 2. Language, Context & Custom Vocabulary
-        sec2 = self._make_section(layout, "Language, Context && Custom Vocabulary")
-        self._rewrite_group, row_rw = self._make_segmented_row(
-            "Rewrite Style:",
-            [("fluent", "Fluent Rewrite"), ("light", "Light Cleanup"), ("verbatim", "Verbatim")],
+        cards_col = QVBoxLayout()
+        cards_col.setSpacing(6)
+
+        self._rewrite_group, row_rw = self._make_segmented_group(
+            [("fluent", "Fluent"), ("light", "Light"), ("verbatim", "Verbatim")],
             self._set_rewrite_mode,
         )
-        sec2.addLayout(row_rw)
+        rw_card, _ = self._make_settings_card(
+            "\ue70f",
+            "Rewrite style",
+            "How strongly Qwen3 polishes grammar and filler words.",
+            row_rw,
+        )
+        cards_col.addWidget(rw_card)
 
-        self._lang_group, row_lang = self._make_segmented_row(
-            "Spoken Language:",
+        self._lang_group, row_lang = self._make_segmented_group(
             [("auto", "Auto (EN/NL/DE)"), ("en", "English"), ("nl", "Nederlands"), ("de", "Deutsch")],
             self._set_language,
         )
-        sec2.addLayout(row_lang)
-
-        self._context_style_chk = QCheckBox(
-            "App-aware tone (automatically adapts for Email, Chat, Code, Docs)"
+        lang_card, _ = self._make_settings_card(
+            "\ue774",
+            "Spoken language",
+            "Choose auto-detection or lock speech recognition to one language.",
+            row_lang,
+            stacked=True,
         )
-        self._context_style_chk.toggled.connect(self._save_checkbox_settings)
-        sec2.addWidget(self._context_style_chk)
+        cards_col.addWidget(lang_card)
 
-        vocab_lbl = QLabel("Custom Vocabulary (domain terms, names, acronyms — comma or newline separated):")
-        vocab_lbl.setObjectName("MutedText")
-        sec2.addWidget(vocab_lbl)
-        row_vocab = QHBoxLayout()
+        vocab_box = QVBoxLayout()
+        vocab_box.setSpacing(10)
         self._vocab_edit = QPlainTextEdit()
-        self._vocab_edit.setFixedHeight(64)
+        self._vocab_edit.setFixedHeight(76)
         self._vocab_edit.setPlaceholderText("e.g. OpenVINO, Kubernetes, DSGVO, Ceres, jbuscher-bds")
+        vocab_actions = QHBoxLayout()
+        vocab_actions.addStretch(1)
         save_vocab_btn = QPushButton("Save Vocabulary")
+        save_vocab_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         save_vocab_btn.clicked.connect(self._save_vocabulary)
-        row_vocab.addWidget(self._vocab_edit, 1)
-        row_vocab.addWidget(save_vocab_btn)
-        sec2.addLayout(row_vocab)
+        vocab_actions.addWidget(save_vocab_btn)
+        vocab_box.addWidget(self._vocab_edit)
+        vocab_box.addLayout(vocab_actions)
 
-        # 3. Audio, Auto-Paste & Windows Integration
-        sec3 = self._make_section(layout, "Microphone, Auto-Paste && Windows")
-        row_mic = QHBoxLayout()
-        row_mic.addWidget(self._field_label("Input Microphone:"))
-        self._mic_combo = QComboBox()
+        vocab_card, _ = self._make_settings_card(
+            "\ue765",
+            "Custom vocabulary",
+            "Domain terms, names, or acronyms (comma or newline separated).",
+            vocab_box,
+            stacked=True,
+        )
+        cards_col.addWidget(vocab_card)
+
+        layout.addLayout(cards_col)
+        layout.addStretch(1)
+        return scroll
+
+    def _build_shortcuts_system_page(self) -> QWidget:
+        scroll, layout = self._make_scrollable_page(
+            "Shortcuts & System",
+            "Manage appearance, global hotkeys, microphone selection, and Windows integration.",
+        )
+
+        # Appearance section
+        app_hdr = QLabel("Appearance")
+        app_hdr.setObjectName("SectionTitle")
+        layout.addWidget(app_hdr)
+
+        app_cards = QVBoxLayout()
+        app_cards.setSpacing(6)
+        self._theme_group, row_theme = self._make_segmented_group(
+            [("system", "System"), ("light", "Light"), ("dark", "Dark")],
+            self._set_theme,
+        )
+        theme_card, _ = self._make_settings_card(
+            "\ue790",
+            "App theme",
+            "Follow Windows 11 Light/Dark settings automatically or lock a mode.",
+            row_theme,
+        )
+        app_cards.addWidget(theme_card)
+        layout.addLayout(app_cards)
+
+        # Shortcuts section
+        hk_hdr = QLabel("Shortcuts")
+        hk_hdr.setObjectName("SectionTitle")
+        layout.addWidget(hk_hdr)
+
+        hk_cards = QVBoxLayout()
+        hk_cards.setSpacing(6)
+
+        self._hk_record_btn = QPushButton()
+        self._hk_record_btn.setObjectName("HotkeyBtn")
+        self._hk_record_btn.setFixedWidth(190)
+        self._hk_record_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._hk_record_btn.clicked.connect(lambda: self._start_hotkey_capture("dictate"))
+        dict_hk_card, _ = self._make_settings_card(
+            "\ue765",
+            "Dictation shortcut",
+            "Global shortcut to start or stop speech dictation (Esc cancels).",
+            self._hk_record_btn,
+        )
+        hk_cards.addWidget(dict_hk_card)
+
+        self._edit_hk_btn = QPushButton()
+        self._edit_hk_btn.setObjectName("HotkeyBtn")
+        self._edit_hk_btn.setFixedWidth(190)
+        self._edit_hk_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._edit_hk_btn.clicked.connect(lambda: self._start_hotkey_capture("edit"))
+        edit_hk_card, _ = self._make_settings_card(
+            "\ue70f",
+            "Voice Edit shortcut",
+            "Highlight text in any window, press hotkey, and speak an edit command.",
+            self._edit_hk_btn,
+        )
+        hk_cards.addWidget(edit_hk_card)
+
+        self._trigger_group, row_trig = self._make_segmented_group(
+            [("hybrid", "Hybrid"), ("toggle", "Toggle"), ("hold", "Hold")],
+            self._on_trigger_selected,
+        )
+        trig_card, _ = self._make_settings_card(
+            "\ue718",
+            "Trigger behavior",
+            "Tap to toggle or hold push-to-talk when using your dictation hotkey.",
+            row_trig,
+        )
+        hk_cards.addWidget(trig_card)
+        layout.addLayout(hk_cards)
+
+        # Audio & Windows section
+        sys_hdr = QLabel("Audio & Windows")
+        sys_hdr.setObjectName("SectionTitle")
+        layout.addWidget(sys_hdr)
+
+        sys_cards = QVBoxLayout()
+        sys_cards.setSpacing(6)
+
+        self._mic_combo = CleanComboBox(tokens=self._tokens)
         self._mic_combo.addItem("System Default", None)
         for dev in self._mic_devices:
-            self._mic_combo.addItem(f"[{dev['index']}] {dev['name']}", int(dev["index"]))
+            self._mic_combo.addItem(str(dev["name"]), int(dev["index"]))
         self._mic_combo.currentIndexChanged.connect(self._on_mic_selected)
-        row_mic.addWidget(self._mic_combo, 1)
-        sec3.addLayout(row_mic)
+        self._combo_boxes.append(self._mic_combo)
+        mic_card, _ = self._make_settings_card(
+            "\ue720",
+            "Input microphone",
+            "Audio capture device used for 16 kHz local transcription.",
+            self._mic_combo,
+            stacked=True,
+        )
+        sys_cards.addWidget(mic_card)
 
-        self._auto_paste_chk = QCheckBox("Auto-paste directly into active window")
-        self._preserve_clip_chk = QCheckBox("Restore previous clipboard text after pasting")
-        self._play_chime_chk = QCheckBox("Play subtle start / stop sound cue")
-        self._autostart_chk = QCheckBox("Start Ceres minimized with Windows")
+        self._auto_paste_chk = FluentToggleSwitch("", tokens=self._tokens, show_state_label=True)
+        self._preserve_clip_chk = FluentToggleSwitch("", tokens=self._tokens, show_state_label=True)
+        self._play_chime_chk = FluentToggleSwitch("", tokens=self._tokens, show_state_label=True)
+        self._autostart_chk = FluentToggleSwitch("", tokens=self._tokens, show_state_label=True)
+
+        for chk in (
+            self._auto_paste_chk,
+            self._preserve_clip_chk,
+            self._play_chime_chk,
+            self._autostart_chk,
+        ):
+            self._toggle_switches.append(chk)
 
         for chk in (self._auto_paste_chk, self._preserve_clip_chk, self._play_chime_chk):
             chk.toggled.connect(self._save_checkbox_settings)
-            sec3.addWidget(chk)
         self._autostart_chk.toggled.connect(self._on_autostart_toggled)
-        sec3.addWidget(self._autostart_chk)
 
-        # 4. Intel AI Boost NPU & Models
-        sec4 = self._make_section(layout, "Intel AI Boost NPU Engine && Models")
-        self._device_group, row_dev = self._make_segmented_row(
-            "AI Accelerator:",
+        toggle_rows = (
+            (
+                "\ue77f",
+                "Auto-paste",
+                "Automatically paste dictated text into the active window.",
+                self._auto_paste_chk,
+            ),
+            (
+                "\ue8c8",
+                "Restore clipboard",
+                "Preserve and restore your previous clipboard text after pasting.",
+                self._preserve_clip_chk,
+            ),
+            ("\ue767", "Sound feedback", "Play subtle start and stop audio cues.", self._play_chime_chk),
+            (
+                "\ue770",
+                "Start with Windows",
+                "Launch Ceres minimized in the system tray at login.",
+                self._autostart_chk,
+            ),
+        )
+        for glyph, title, desc, chk in toggle_rows:
+            card, _ = self._make_settings_card(glyph, title, desc, chk)
+            sys_cards.addWidget(card)
+
+        layout.addLayout(sys_cards)
+        layout.addStretch(1)
+        return scroll
+
+    def _build_engine_page(self) -> QWidget:
+        scroll, layout = self._make_scrollable_page(
+            "Engine & Models",
+            "Select OpenVINO NPU/GPU accelerators, local speech & rewriter models, and desktop helpers.",
+        )
+
+        rt_hdr = QLabel("Local AI Runtime")
+        rt_hdr.setObjectName("SectionTitle")
+        layout.addWidget(rt_hdr)
+
+        rt_cards = QVBoxLayout()
+        rt_cards.setSpacing(6)
+
+        self._device_group, row_dev = self._make_segmented_group(
             [("NPU", "NPU"), ("GPU", "GPU"), ("CPU", "CPU")],
             lambda _dev: None,
         )
-        sec4.addLayout(row_dev)
+        dev_card, _ = self._make_settings_card(
+            "\ue950",
+            "AI accelerator",
+            "Preferred OpenVINO device for local inference and model compilation.",
+            row_dev,
+        )
+        rt_cards.addWidget(dev_card)
 
-        row_whisper = QHBoxLayout()
-        row_whisper.addWidget(self._field_label("Speech Model:"))
-        self._whisper_combo = QComboBox()
-        for spec in WHISPER_CATALOG:
-            self._whisper_combo.addItem(f"{spec.display_name} ({spec.repo_id})", spec.repo_id)
-        row_whisper.addWidget(self._whisper_combo, 1)
-        sec4.addLayout(row_whisper)
+        self._whisper_combo = CleanComboBox(tokens=self._tokens)
+        for idx, spec in enumerate(WHISPER_CATALOG):
+            self._whisper_combo.addItem(spec.display_name, spec.repo_id)
+            self._whisper_combo.setItemData(idx, spec.repo_id, Qt.ItemDataRole.ToolTipRole)
+        self._combo_boxes.append(self._whisper_combo)
+        whisper_card, _ = self._make_settings_card(
+            "\ue720",
+            "Speech model",
+            "Local OpenVINO Whisper speech recognition checkpoint.",
+            self._whisper_combo,
+            stacked=True,
+        )
+        rt_cards.addWidget(whisper_card)
 
-        row_llm = QHBoxLayout()
-        row_llm.addWidget(self._field_label("Rewriter Model:"))
-        self._llm_combo = QComboBox()
-        for spec in LLM_CATALOG:
-            self._llm_combo.addItem(f"{spec.display_name} ({spec.repo_id})", spec.repo_id)
-        row_llm.addWidget(self._llm_combo, 1)
-        sec4.addLayout(row_llm)
+        self._llm_combo = CleanComboBox(tokens=self._tokens)
+        for idx, spec in enumerate(LLM_CATALOG):
+            self._llm_combo.addItem(spec.display_name, spec.repo_id)
+            self._llm_combo.setItemData(idx, spec.repo_id, Qt.ItemDataRole.ToolTipRole)
+        self._combo_boxes.append(self._llm_combo)
+        llm_card, _ = self._make_settings_card(
+            "\ue950",
+            "Rewriter model",
+            "Local OpenVINO Qwen3 model used for polishing and voice edits.",
+            self._llm_combo,
+            stacked=True,
+        )
+        rt_cards.addWidget(llm_card)
 
-        row_actions = QHBoxLayout()
+        layout.addLayout(rt_cards)
+
+        apply_row = QHBoxLayout()
         apply_btn = QPushButton("Apply && Reload Models")
         apply_btn.setObjectName("PrimaryBtn")
+        apply_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         apply_btn.clicked.connect(self._apply_engine_settings)
+        apply_row.addWidget(apply_btn)
+        apply_row.addStretch(1)
+        layout.addLayout(apply_row)
+
+        util_hdr = QLabel("Desktop Utilities")
+        util_hdr.setObjectName("SectionTitle")
+        layout.addWidget(util_hdr)
+
+        util_card = QFrame()
+        util_card.setObjectName("SettingsCard")
+        util_layout = QHBoxLayout(util_card)
+        util_layout.setContentsMargins(18, 14, 18, 14)
+        util_layout.setSpacing(10)
+
         shortcut_btn = QPushButton("Create Desktop Shortcut")
+        shortcut_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         shortcut_btn.clicked.connect(self._create_desktop_shortcut)
+
         models_btn = QPushButton("Open Models Folder")
+        models_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         models_btn.clicked.connect(lambda: os.startfile(str(MODELS_DIR)))
+
         reset_pill_btn = QPushButton("Reset Pill Position")
+        reset_pill_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         reset_pill_btn.clicked.connect(self._reset_pill_position)
-        row_actions.addWidget(apply_btn)
-        row_actions.addWidget(shortcut_btn)
-        row_actions.addWidget(models_btn)
-        row_actions.addWidget(reset_pill_btn)
-        row_actions.addStretch(1)
-        sec4.addLayout(row_actions)
+
+        util_layout.addWidget(shortcut_btn)
+        util_layout.addWidget(models_btn)
+        util_layout.addWidget(reset_pill_btn)
+        util_layout.addStretch(1)
+        layout.addWidget(util_card)
 
         layout.addStretch(1)
-        scroll.setWidget(inner)
         return scroll
 
-    @staticmethod
-    def _field_label(text: str) -> QLabel:
-        lbl = QLabel(text)
-        lbl.setFixedWidth(155)
-        return lbl
+    def _make_scrollable_page(self, title: str, subtitle: str) -> tuple[QScrollArea, QVBoxLayout]:
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        inner = QWidget()
+        inner.setObjectName("ScrollContent")
+        layout = QVBoxLayout(inner)
+        layout.setContentsMargins(28, 24, 28, 24)
+        layout.setSpacing(14)
+        layout.addLayout(self._make_page_header(title, subtitle))
+        scroll.setWidget(inner)
+        return scroll, layout
 
     @staticmethod
-    def _make_section(parent_layout: QVBoxLayout, title: str) -> QVBoxLayout:
-        card = QFrame()
-        card.setObjectName("SubCard")
-        v = QVBoxLayout(card)
-        v.setContentsMargins(14, 12, 14, 12)
-        v.setSpacing(8)
-        hdr = QLabel(title)
-        hdr.setObjectName("SectionTitle")
-        v.addWidget(hdr)
-        parent_layout.addWidget(card)
-        return v
+    def _make_page_header(title: str, subtitle: str) -> QVBoxLayout:
+        hdr = QVBoxLayout()
+        hdr.setSpacing(3)
+        title_lbl = QLabel(title)
+        title_lbl.setObjectName("PageTitle")
+        sub_lbl = QLabel(subtitle)
+        sub_lbl.setObjectName("PageSubtitle")
+        sub_lbl.setWordWrap(True)
+        hdr.addWidget(title_lbl)
+        hdr.addWidget(sub_lbl)
+        return hdr
 
-    def _make_segmented_row(
+    def _make_settings_card(
         self,
-        label_text: str,
+        icon_glyph: str,
+        title: str,
+        description: str,
+        control: QWidget | QLayout | None = None,
+        *,
+        stacked: bool = False,
+    ) -> tuple[QFrame, QVBoxLayout]:
+        """Build a WinUI 3 SettingsCard row with icon, title/description, and inline or stacked control."""
+        card = QFrame()
+        card.setObjectName("SettingsCard")
+        outer = QVBoxLayout(card)
+        outer.setContentsMargins(18, 14, 18, 14)
+        outer.setSpacing(12 if stacked else 0)
+
+        top = QHBoxLayout()
+        top.setSpacing(14)
+
+        icon_lbl = QLabel(icon_glyph)
+        icon_font = QFont(FLUENT_ICON_FONT)
+        icon_font.setPixelSize(16)
+        icon_lbl.setFont(icon_font)
+        icon_lbl.setFixedWidth(22)
+        icon_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        icon_lbl.setStyleSheet(f"color: {self._tokens.text_secondary};")
+        self._card_icons.append(icon_lbl)
+        top.addWidget(icon_lbl)
+
+        text_col = QVBoxLayout()
+        text_col.setSpacing(2)
+        t_lbl = QLabel(title)
+        t_lbl.setObjectName("CardTitle")
+        d_lbl = QLabel(description)
+        d_lbl.setObjectName("CardDesc")
+        d_lbl.setWordWrap(True)
+        text_col.addWidget(t_lbl)
+        text_col.addWidget(d_lbl)
+        top.addLayout(text_col, 1)
+
+        if not stacked and control is not None:
+            if isinstance(control, QWidget):
+                top.addWidget(control, 0, Qt.AlignmentFlag.AlignVCenter)
+            else:
+                top.addLayout(control)
+
+        outer.addLayout(top)
+
+        if stacked and control is not None:
+            body_row = QHBoxLayout()
+            body_row.setContentsMargins(36, 0, 0, 0)
+            if isinstance(control, QWidget):
+                body_row.addWidget(control, 1)
+            else:
+                body_row.addLayout(control, 1)
+            outer.addLayout(body_row)
+
+        return card, outer
+
+    def _make_segmented_group(
+        self,
         options: list[tuple[str, str]],
         on_select,
     ) -> tuple[QButtonGroup, QHBoxLayout]:
         row = QHBoxLayout()
-        row.addWidget(self._field_label(label_text))
+        row.setSpacing(6)
         group = QButtonGroup(self)
         group.setExclusive(True)
         for idx, (val, caption) in enumerate(options):
             btn = QPushButton(caption)
             btn.setObjectName("SegmentBtn")
             btn.setCheckable(True)
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
             btn.setProperty("seg_value", val)
             group.addButton(btn, idx)
             row.addWidget(btn)
-        row.addStretch(1)
 
         def _clicked(button: QPushButton) -> None:
             on_select(str(button.property("seg_value")))
@@ -462,17 +830,22 @@ class CeresWindow(QMainWindow):
         checked = group.checkedButton()
         return str(checked.property("seg_value")) if checked is not None else default
 
+    @staticmethod
+    def _clean_device_name(name: str) -> str:
+        cleaned = _BRAND_NOISE_RE.sub("", name)
+        return " ".join(cleaned.split())
+
     def _format_hardware_badge(self) -> str:
         devs = self.controller.available_devices
-        npu = devs.get("NPU")
-        gpu = devs.get("GPU")
+        npu = self._clean_device_name(devs["NPU"]) if devs.get("NPU") else ""
+        gpu = self._clean_device_name(devs["GPU"]) if devs.get("GPU") else ""
         if npu and gpu:
-            return f"NPU: {npu}  |  GPU: {gpu}"
+            return f"NPU: {npu}\nGPU: {gpu}"
         if npu:
-            return f"NPU Active: {npu}"
+            return f"NPU: {npu}"
         if gpu:
-            return f"GPU Active: {gpu}"
-        return f"Device: {devs.get('CPU', 'CPU')}"
+            return f"GPU: {gpu}"
+        return f"Device: {self._clean_device_name(devs.get('CPU', 'CPU'))}"
 
     def _sync_ui_from_config(self) -> None:
         cfg = self.config_manager.config
@@ -480,11 +853,11 @@ class CeresWindow(QMainWindow):
         edit_disp = format_hotkey_display(cfg.edit_hotkey)
         trig_disp = {"hybrid": "Hybrid", "toggle": "Toggle", "hold": "Hold"}.get(cfg.trigger_mode, "Hybrid")
 
-        self._dictate_pill_lbl.setText(f"Dictate: {hk_disp} ({trig_disp})")
-        self._edit_pill_lbl.setText(f"Voice Edit: {edit_disp}")
+        self._shortcuts_hint.setText(f"Dictate: {hk_disp} ({trig_disp})\nEdit: {edit_disp}")
         self._hk_record_btn.setText(hk_disp)
         self._edit_hk_btn.setText(edit_disp)
 
+        self._set_segment_value(self._theme_group, cfg.theme)
         self._set_segment_value(self._trigger_group, cfg.trigger_mode)
         self._set_segment_value(self._rewrite_group, cfg.rewrite_mode)
         self._set_segment_value(self._lang_group, cfg.language)
@@ -493,7 +866,6 @@ class CeresWindow(QMainWindow):
         self._vocab_edit.setPlainText(", ".join(cfg.custom_vocabulary))
 
         for widget, val in (
-            (self._context_style_chk, cfg.context_aware_style),
             (self._auto_paste_chk, cfg.auto_paste),
             (self._preserve_clip_chk, cfg.preserve_clipboard),
             (self._play_chime_chk, cfg.play_chime),
@@ -524,7 +896,7 @@ class CeresWindow(QMainWindow):
         self.config_manager.update(pill_position=None)
         self.pill._saved_position = None
         self.pill._reposition()
-        self._status_label.setText("Floating pill position reset to active monitor bottom-center.")
+        self._status_label.setText("Floating pill reset to active monitor bottom-center.")
 
     def _handle_hotkey_start(self, action: str = "dictate") -> None:
         if self.controller.start_listening(action=action):
@@ -555,25 +927,17 @@ class CeresWindow(QMainWindow):
             self._handle_hotkey_start("dictate")
 
     def _on_pipeline_event(self, ev: PipelineEvent) -> None:
-        self.pill.show_state(
-            ev.state,
-            ev.message,
-            app_context=ev.app_context,
-            action_type=ev.action_type,
-        )
+        self._last_pipeline_state = ev.state
+        if ev.state in ("listening", "transcribing", "rewriting", "done", "error") or (
+            ev.state == "ready" and self.pill.isVisible()
+        ):
+            self.pill.show_state(
+                ev.state,
+                ev.message,
+                action_type=ev.action_type,
+            )
         self.tray.set_state(ev.state, f"Ceres — {ev.message}")
-
-        color_map = {
-            "ready": "#22C55E",
-            "done": "#22C55E",
-            "listening": "#22C55E",
-            "downloading": "#F59E0B",
-            "compiling": "#F59E0B",
-            "transcribing": "#F59E0B",
-            "rewriting": "#F59E0B",
-            "error": "#EF4444",
-        }
-        self._status_dot.setStyleSheet(f"color: {color_map.get(ev.state, '#94A3B8')}; font-size: 14px;")
+        self._update_status_appearance(ev.state)
 
         if ev.state in ("downloading", "compiling"):
             self._progress_bar.show()
@@ -582,13 +946,11 @@ class CeresWindow(QMainWindow):
         else:
             self._progress_bar.hide()
             if ev.state in ("ready", "done"):
-                self._status_label.setText(f"{ev.message}  ({ev.device_summary})")
+                summary = f" ({ev.device_summary})" if ev.device_summary else ""
+                self._status_label.setText(f"{ev.message}{summary}")
                 self._restore_dictate_btn()
             elif ev.state == "listening":
-                ctx_tag = (
-                    f" • {ev.app_context.upper()}" if ev.app_context and ev.app_context != "general" else ""
-                )
-                self._status_label.setText(f"{ev.message}{ctx_tag} (Esc to cancel)")
+                self._status_label.setText(f"{ev.message} (Esc to cancel)")
             else:
                 self._status_label.setText(ev.message)
                 if ev.state == "error":
@@ -602,6 +964,8 @@ class CeresWindow(QMainWindow):
             item = self._history_layout.takeAt(0)
             widget = item.widget() if item is not None else None
             if widget is not None:
+                widget.hide()
+                widget.setParent(None)
                 widget.deleteLater()
 
         query = self._search_input.text().strip() if hasattr(self, "_search_input") else ""
@@ -611,12 +975,12 @@ class CeresWindow(QMainWindow):
 
         if not entries:
             empty_msg = (
-                "No matching entries." if query else "No dictations yet. Press Ctrl + Shift + Space anywhere!"
+                "No matching entries." if query else "No dictations yet. Press Ctrl + Shift + Space anywhere."
             )
             empty_lbl = QLabel(empty_msg)
             empty_lbl.setObjectName("MutedText")
             empty_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            empty_lbl.setContentsMargins(0, 28, 0, 28)
+            empty_lbl.setContentsMargins(0, 32, 0, 32)
             self._history_layout.insertWidget(0, empty_lbl)
             return
 
@@ -625,32 +989,37 @@ class CeresWindow(QMainWindow):
 
     def _create_history_card(self, entry: HistoryEntry) -> QFrame:
         card = QFrame()
-        card.setObjectName("SubCard")
+        card.setObjectName("HistoryCard")
         v = QVBoxLayout(card)
-        v.setContentsMargins(12, 9, 12, 9)
-        v.setSpacing(6)
+        v.setContentsMargins(18, 14, 18, 14)
+        v.setSpacing(8)
 
         meta_row = QHBoxLayout()
-        ts_short = entry.created_at.replace("T", " ")[:19]
-        badges = [
-            entry.action_type.upper(),
-            (entry.language or "auto").upper(),
-            entry.app_context.upper(),
-            entry.rewrite_mode.title(),
-        ]
-        for b in badges:
-            lbl = QLabel(b)
-            lbl.setObjectName("MetaBadge")
-            meta_row.addWidget(lbl)
+        meta_row.setSpacing(8)
 
-        timing = QLabel(f"{ts_short}  •  STT {entry.stt_ms}ms / LLM {entry.llm_ms}ms")
-        timing.setObjectName("MutedText")
-        meta_row.addWidget(timing, 1)
+        if entry.action_type == "edit":
+            tag_lbl = QLabel("Voice Edit")
+            tag_lbl.setObjectName("TagEdit")
+        else:
+            lang_disp = (entry.language or "auto").upper()
+            mode_disp = entry.rewrite_mode.title()
+            tag_lbl = QLabel(f"{lang_disp} · {mode_disp}")
+            tag_lbl.setObjectName("TagNeutral")
+        meta_row.addWidget(tag_lbl)
+
+        ts_short = entry.created_at.replace("T", " ")[:16]
+        total_ms = entry.stt_ms + entry.llm_ms
+        meta_lbl = QLabel(f"{ts_short} · {total_ms}ms")
+        meta_lbl.setObjectName("MutedText")
+        meta_lbl.setToolTip(f"STT {entry.stt_ms}ms / LLM {entry.llm_ms}ms")
+        meta_row.addWidget(meta_lbl, 1)
 
         if entry.action_type != "edit" and entry.raw_text.strip():
             next_mode = "light" if entry.rewrite_mode == "fluent" else "fluent"
-            repolish_btn = QPushButton(f"Re-polish ({next_mode.title()})")
+            repolish_btn = QPushButton("Re-polish")
             repolish_btn.setObjectName("SmallBtn")
+            repolish_btn.setToolTip(f"Re-polish as {next_mode.title()}")
+            repolish_btn.setCursor(Qt.CursorShape.PointingHandCursor)
             repolish_btn.clicked.connect(
                 lambda _checked=False, e=entry, m=next_mode: self._repolish_history_entry(e, m)
             )
@@ -658,18 +1027,20 @@ class CeresWindow(QMainWindow):
 
         copy_btn = QPushButton("Copy")
         copy_btn.setObjectName("SmallBtn")
+        copy_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         copy_btn.clicked.connect(lambda _checked=False, t=entry.polished_text: set_clipboard_text(t))
         meta_row.addWidget(copy_btn)
         v.addLayout(meta_row)
 
         polished_lbl = QLabel(entry.polished_text)
+        polished_lbl.setObjectName("BodyText")
         polished_lbl.setWordWrap(True)
         polished_lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         v.addWidget(polished_lbl)
 
         if entry.raw_text and entry.raw_text.strip() != entry.polished_text.strip():
             raw_lbl = QLabel(f"Raw: {entry.raw_text}")
-            raw_lbl.setObjectName("MutedText")
+            raw_lbl.setObjectName("RawQuote")
             raw_lbl.setWordWrap(True)
             raw_lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
             v.addWidget(raw_lbl)
@@ -680,7 +1051,6 @@ class CeresWindow(QMainWindow):
         if not self.controller.is_ready:
             self._status_label.setText("Models are still loading — please wait.")
             return
-        import threading
 
         def _worker() -> None:
             try:
@@ -705,7 +1075,7 @@ class CeresWindow(QMainWindow):
         if not file_path:
             return
         export_markdown(entries, Path(file_path))
-        self._status_label.setText(f"Exported {len(entries)} entries to {file_path}")
+        self._status_label.setText(f"Exported {len(entries)} entries to {Path(file_path).name}")
 
     def _clear_history(self) -> None:
         self.history_store.clear_all()
@@ -715,12 +1085,17 @@ class CeresWindow(QMainWindow):
         if self._capturing_target is not None:
             self.hotkey_manager.cancel_recording_hotkey()
             self._capturing_target = None
+            for b in (self._hk_record_btn, self._edit_hk_btn):
+                b.setStyleSheet("")
             self._sync_ui_from_config()
             return
         self._capturing_target = target
         btn = self._hk_record_btn if target == "dictate" else self._edit_hk_btn
-        btn.setText("Press keys now... (Esc cancels)")
-        btn.setStyleSheet("background-color: #F59E0B; color: #0D1117;")
+        btn.setText("Press keys... (Esc cancels)")
+        btn.setStyleSheet(
+            f"background-color: {self._tokens.caution_bg}; border-color: {self._tokens.caution}; "
+            f"color: {self._tokens.caution}; font-weight: 600;"
+        )
 
         def _on_captured(spec: str) -> None:
             self._bridge.hotkey_captured.emit(target, spec)
@@ -766,7 +1141,6 @@ class CeresWindow(QMainWindow):
 
     def _save_checkbox_settings(self) -> None:
         self.config_manager.update(
-            context_aware_style=self._context_style_chk.isChecked(),
             auto_paste=self._auto_paste_chk.isChecked(),
             preserve_clipboard=self._preserve_clip_chk.isChecked(),
             play_chime=self._play_chime_chk.isChecked(),

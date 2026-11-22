@@ -2,7 +2,17 @@ from __future__ import annotations
 
 import pytest
 
-from ceres.system.hotkey import HotkeyStateMachine, format_hotkey_display, parse_hotkey
+from ceres.system.hotkey import (
+    VK_ESCAPE,
+    VK_LCONTROL,
+    VK_LMENU,
+    VK_LSHIFT,
+    VK_SPACE,
+    GlobalHotkeyManager,
+    HotkeyStateMachine,
+    format_hotkey_display,
+    parse_hotkey,
+)
 
 
 def test_parse_hotkey_variants() -> None:
@@ -53,3 +63,56 @@ def test_escape_cancels_active_recording() -> None:
     assert not sm.is_recording
     # Releasing held key after Escape must not fire a second stop
     assert sm.on_combo_up(2.0) is None
+
+
+def test_global_hotkey_manager_exact_modifiers_stale_recovery_and_suppression(monkeypatch) -> None:
+    mgr = GlobalHotkeyManager(hotkey="ctrl+shift+space", edit_hotkey="ctrl+shift+e", trigger_mode="hybrid")
+    physical_down: set[int] = set()
+    monkeypatch.setattr(mgr, "_is_vk_physically_down", lambda vk: vk in physical_down)
+
+    def _drain_events() -> list[tuple[str, object]]:
+        items: list[tuple[str, object]] = []
+        while not mgr._event_queue.empty():
+            items.append(mgr._event_queue.get_nowait())
+        return items
+
+    # 1. Extra modifier (Ctrl+Shift+Alt+E / AltGr) must NOT trigger ctrl+shift+e or suppress 'E'
+    physical_down.update({VK_LCONTROL, VK_LSHIFT, VK_LMENU})
+    assert mgr._handle_key_event(ord("E"), True) is False
+    assert mgr._handle_key_event(ord("E"), False) is False
+    assert _drain_events() == []
+
+    # 2. Stale modifiers left in _pressed_vks when hardware keys are physically UP must be pruned cleanly
+    physical_down.clear()
+    mgr._pressed_vks.update({VK_LCONTROL, VK_LSHIFT})
+    assert mgr._handle_key_event(VK_SPACE, True) is False
+    assert mgr._handle_key_event(VK_SPACE, False) is False
+    assert VK_LCONTROL not in mgr._pressed_vks
+    assert VK_LSHIFT not in mgr._pressed_vks
+    assert _drain_events() == []
+
+    # 3. Normal typing of 'e' or 'space' never suppresses
+    assert mgr._handle_key_event(ord("E"), True) is False
+    assert mgr._handle_key_event(ord("E"), False) is False
+    assert _drain_events() == []
+
+    # 4. Valid Ctrl+Shift+Space suppresses only non-modifier trigger down/up, never Ctrl/Shift
+    physical_down.add(VK_LCONTROL)
+    assert mgr._handle_key_event(VK_LCONTROL, True) is False
+    physical_down.add(VK_LSHIFT)
+    assert mgr._handle_key_event(VK_LSHIFT, True) is False
+    assert mgr._handle_key_event(VK_SPACE, True) is True  # starts dictation & suppresses Space
+    assert mgr._handle_key_event(VK_SPACE, True) is True  # suppresses OS key-repeat
+    assert mgr._handle_key_event(VK_SPACE, False) is True  # suppresses matching Space key-up
+    assert mgr._dictate_state.is_recording is True
+    assert _drain_events() == [("start", "dictate")]
+
+    # 5. Escape cancels active recording and suppresses Escape down/up; idle Escape passes through
+    physical_down.clear()
+    assert mgr._handle_key_event(VK_ESCAPE, True) is True
+    assert mgr._handle_key_event(VK_ESCAPE, False) is True
+    assert mgr._dictate_state.is_recording is False
+    assert _drain_events() == [("cancel", None)]
+
+    assert mgr._handle_key_event(VK_ESCAPE, True) is False
+    assert mgr._handle_key_event(VK_ESCAPE, False) is False

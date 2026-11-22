@@ -411,6 +411,7 @@ class GlobalHotkeyManager:
         self._on_cancel = on_cancel
 
         self._pressed_vks: set[int] = set()
+        self._suppressed_vks: set[int] = set()
         self._event_queue: queue.SimpleQueue[tuple[str, Any]] = queue.SimpleQueue()
         self._hook_handle: int | None = None
         self._hook_proc: Any = None
@@ -495,14 +496,17 @@ class GlobalHotkeyManager:
             self._dispatch_thread = None
         self._hook_thread_id = None
 
+    def _is_vk_physically_down(self, vk: int) -> bool:
+        return (_user32.GetAsyncKeyState(vk) & 0x8000) != 0
+
     def _active_modifiers(self, current_vk: int | None = None, is_down: bool = False) -> set[str]:
         mods: set[str] = set()
         for mod_name, vks in MODIFIER_CHECK_VKS.items():
-            if any((_user32.GetAsyncKeyState(vk) & 0x8000) != 0 for vk in vks):
+            if any(self._is_vk_physically_down(vk) for vk in vks):
                 mods.add(mod_name)
-        for vk in list(self._pressed_vks):
-            if vk in MODIFIER_VKS:
-                mods.add(MODIFIER_VKS[vk])
+            else:
+                for vk in vks:
+                    self._pressed_vks.discard(vk)
         if current_vk is not None and current_vk in MODIFIER_VKS:
             mod_name = MODIFIER_VKS[current_vk]
             if is_down:
@@ -519,7 +523,7 @@ class GlobalHotkeyManager:
         is_down: bool,
     ) -> bool:
         mods = self._active_modifiers(current_vk=current_vk, is_down=is_down)
-        if not req_mods.issubset(mods):
+        if mods != req_mods:
             return False
         if trigger_key is None:
             return len(req_mods) > 0
@@ -556,23 +560,34 @@ class GlobalHotkeyManager:
                 self._hook_handle = None
 
     def _low_level_handler(self, n_code: int, w_param: int, l_param: int) -> int:
+        suppress = False
         if n_code >= 0 and l_param:
             kb = _KBDLLHOOKSTRUCT.from_address(l_param)
-            if (kb.flags & LLKHF_INJECTED) == 0:
-                vk = int(kb.vkCode)
-                is_down = w_param in (WM_KEYDOWN, WM_SYSKEYDOWN)
-                is_up = w_param in (WM_KEYUP, WM_SYSKEYUP)
-                if is_down or is_up:
-                    self._handle_key_event(vk, is_down)
+            vk = int(kb.vkCode)
+            is_down = w_param in (WM_KEYDOWN, WM_SYSKEYDOWN)
+            is_up = w_param in (WM_KEYUP, WM_SYSKEYUP)
+            if (kb.flags & LLKHF_INJECTED) != 0:
+                if is_up:
+                    with self._lock:
+                        self._pressed_vks.discard(vk)
+            elif is_down or is_up:
+                suppress = self._handle_key_event(vk, is_down)
+        if suppress:
+            return 1
         return _user32.CallNextHookEx(self._hook_handle, n_code, w_param, l_param)
 
-    def _handle_key_event(self, vk: int, is_down: bool) -> None:
+    def _handle_key_event(self, vk: int, is_down: bool) -> bool:
         now = time.monotonic()
         with self._lock:
             if is_down:
                 self._pressed_vks.add(vk)
             else:
                 self._pressed_vks.discard(vk)
+
+            swallow_suppressed_up = False
+            if not is_down and vk in self._suppressed_vks:
+                self._suppressed_vks.discard(vk)
+                swallow_suppressed_up = vk not in MODIFIER_VKS
 
             # Handle interactive shortcut capture in Settings
             if self._capture_callback is not None:
@@ -582,18 +597,21 @@ class GlobalHotkeyManager:
                         cb = self._capture_callback
                         self.cancel_recording_hotkey()
                         self._event_queue.put(("captured", (cb, "")))
-                        return
+                        self._suppressed_vks.add(vk)
+                        return True
                     if name in MODIFIER_ORDER:
                         self._capture_mods.add(name)
-                    else:
-                        self._capture_mods.update(self._active_modifiers(current_vk=vk, is_down=True))
-                        self._capture_key = name
-                        if self._capture_mods or name.startswith("f"):
-                            spec = format_hotkey(self._capture_mods, self._capture_key)
-                            cb = self._capture_callback
-                            self.cancel_recording_hotkey()
-                            self._event_queue.put(("captured", (cb, spec)))
-                elif (
+                        return False
+                    self._capture_mods.update(self._active_modifiers(current_vk=vk, is_down=True))
+                    self._capture_key = name
+                    if self._capture_mods or name.startswith("f"):
+                        spec = format_hotkey(self._capture_mods, self._capture_key)
+                        cb = self._capture_callback
+                        self.cancel_recording_hotkey()
+                        self._event_queue.put(("captured", (cb, spec)))
+                    self._suppressed_vks.add(vk)
+                    return True
+                if (
                     not is_down
                     and self._capture_mods
                     and self._capture_key is None
@@ -605,16 +623,25 @@ class GlobalHotkeyManager:
                     cb = self._capture_callback
                     self.cancel_recording_hotkey()
                     self._event_queue.put(("captured", (cb, spec)))
-                return
+                return swallow_suppressed_up
 
             if is_down and vk == VK_ESCAPE:
                 action = self._dictate_state.on_escape() or self._edit_state.on_escape()
                 if action:
                     self._event_queue.put((action, None))
-                return
+                    self._suppressed_vks.add(vk)
+                    return True
+                return False
 
             dictate_now = self._is_combo_active(self._dictate_modifiers, self._dictate_trigger, vk, is_down)
             edit_now = self._is_combo_active(self._edit_modifiers, self._edit_trigger, vk, is_down)
+            dictate_trigger_vk = _KEY_NAME_TO_VK.get(self._dictate_trigger) if self._dictate_trigger else None
+            edit_trigger_vk = _KEY_NAME_TO_VK.get(self._edit_trigger) if self._edit_trigger else None
+            suppress_trigger = (
+                is_down
+                and vk not in MODIFIER_VKS
+                and ((dictate_now and vk == dictate_trigger_vk) or (edit_now and vk == edit_trigger_vk))
+            )
 
             if self._edit_state.is_recording:
                 edit_action = (
@@ -622,7 +649,10 @@ class GlobalHotkeyManager:
                 )
                 if edit_action == "stop":
                     self._event_queue.put(("stop", None))
-                return
+                if suppress_trigger:
+                    self._suppressed_vks.add(vk)
+                    return True
+                return swallow_suppressed_up
 
             if self._dictate_state.is_recording:
                 dict_action = (
@@ -632,7 +662,10 @@ class GlobalHotkeyManager:
                 )
                 if dict_action == "stop":
                     self._event_queue.put(("stop", None))
-                return
+                if suppress_trigger:
+                    self._suppressed_vks.add(vk)
+                    return True
+                return swallow_suppressed_up
 
             if dictate_now:
                 if self._dictate_state.on_combo_down(now) == "start":
@@ -645,6 +678,11 @@ class GlobalHotkeyManager:
                     self._event_queue.put(("start", "edit"))
             else:
                 self._edit_state.on_combo_up(now)
+
+            if suppress_trigger:
+                self._suppressed_vks.add(vk)
+                return True
+            return swallow_suppressed_up
 
     def _dispatch_loop(self) -> None:
         while True:

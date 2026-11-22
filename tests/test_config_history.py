@@ -12,6 +12,7 @@ def test_config_roundtrip_and_normalization(tmp_path: Path) -> None:
     assert mgr.config.hotkey == "ctrl+shift+space"
     assert mgr.config.trigger_mode == "hybrid"
     assert mgr.config.preferred_device == "NPU"
+    assert mgr.config.theme == "system"
 
     updated = mgr.update(
         hotkey="alt+space",
@@ -20,6 +21,7 @@ def test_config_roundtrip_and_normalization(tmp_path: Path) -> None:
         language="nl",
         preferred_device="gpu",
         preserve_clipboard=True,
+        theme="dark",
     )
     assert updated.hotkey == "alt+space"
     assert updated.trigger_mode == "hybrid"  # invalid falls back safely
@@ -27,9 +29,13 @@ def test_config_roundtrip_and_normalization(tmp_path: Path) -> None:
     assert updated.language == "nl"
     assert updated.preferred_device == "GPU"
     assert updated.preserve_clipboard is True
+    assert updated.theme == "dark"
 
     mgr_reloaded = ConfigManager(cfg_path)
     assert mgr_reloaded.config == updated
+
+    assert mgr.update(theme="light").theme == "light"
+    assert mgr.update(theme="neon_invalid").theme == "system"
 
 
 def test_config_handles_corrupted_json(tmp_path: Path) -> None:

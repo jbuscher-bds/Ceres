@@ -7,16 +7,14 @@ from ceres.engine.rewriter import (
 )
 
 
-def test_build_rewrite_messages_includes_context_and_vocabulary() -> None:
+def test_build_rewrite_messages_includes_vocabulary() -> None:
     msgs = build_rewrite_messages(
         "um open the config file",
         mode="fluent",
         language_hint="en",
-        app_context="code",
         vocabulary=["OpenVINO", "Ceres", "PySide6"],
     )
     sys_msg = msgs[0]["content"]
-    assert "CODE/DEV" in sys_msg
     assert "OpenVINO, Ceres, PySide6" in sys_msg
 
 

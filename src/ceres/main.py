@@ -55,15 +55,21 @@ def _release_mutex(handle: int | None) -> None:
 
 def _create_qt_app() -> object:
     from PySide6.QtCore import Qt
+    from PySide6.QtGui import QFont
     from PySide6.QtWidgets import QApplication
 
-    from ceres.ui.theme import get_app_qicon
+    from ceres.ui.theme import FONT_FAMILIES, get_app_qicon
 
     with contextlib.suppress(Exception):
         ctypes.WinDLL("shell32").SetCurrentProcessExplicitAppUserModelID("jbuscher-bds.Ceres.Desktop")
 
     QApplication.setHighDpiScaleFactorRoundingPolicy(Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
     app = QApplication(sys.argv)
+    app.setStyle("Fusion")
+    default_font = QFont()
+    default_font.setFamilies(FONT_FAMILIES)
+    default_font.setPixelSize(13)
+    app.setFont(default_font)
     app.setQuitOnLastWindowClosed(False)
     app.setApplicationName("Ceres")
     app.setWindowIcon(get_app_qicon())
@@ -71,9 +77,8 @@ def _create_qt_app() -> object:
 
 
 def run_self_test() -> int:
-    """Verify Qt 6 HiDPI pill WS_EX_NOACTIVATE, dual WH_KEYBOARD_LL hook, context lookup, and devices."""
+    """Verify Qt 6 HiDPI pill WS_EX_NOACTIVATE, dual WH_KEYBOARD_LL hook, and OpenVINO devices."""
     from ceres.engine.model_manager import get_device_info
-    from ceres.system.context import get_active_window_context
     from ceres.ui.main_window import CeresWindow
 
     qt_app = _create_qt_app()
@@ -84,11 +89,9 @@ def run_self_test() -> int:
         pill_size = win.pill.logical_size()
         hook_ok = win.hotkey_manager.is_running
         devices = get_device_info()
-        ctx = get_active_window_context()
         print(f"SELF_TEST pill_ws_ex_noactivate={pill_ok}")
         print(f"SELF_TEST pill_logical_size={pill_size}")
         print(f"SELF_TEST global_hotkey_hook={hook_ok}")
-        print(f"SELF_TEST active_context={ctx.category}")
         print(f"SELF_TEST openvino_devices={devices}")
         if not pill_ok or not hook_ok:
             return 1

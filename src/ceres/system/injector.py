@@ -29,6 +29,7 @@ VK_LMENU = 0xA4
 VK_RMENU = 0xA5
 VK_C = 0x43
 VK_V = 0x56
+_VK_MENU_MASK = 0xE8  # Unassigned VK to prevent Alt/Win keyup from activating menu bar
 
 
 class _MOUSEINPUT(ctypes.Structure):
@@ -184,18 +185,26 @@ def _send_key_events(events: list[tuple[int, int]]) -> int:
 
 def _release_held_modifiers() -> None:
     """Wait briefly for user modifier keys to lift, then release any stray modifiers."""
-    monitored = (VK_SHIFT, VK_LSHIFT, VK_RSHIFT, VK_MENU, VK_LMENU, VK_RMENU, VK_LWIN, VK_RWIN)
+    side_non_ctrl = (VK_LSHIFT, VK_RSHIFT, VK_LMENU, VK_RMENU, VK_LWIN, VK_RWIN)
+    side_ctrl = (VK_LCONTROL, VK_RCONTROL)
+    alt_win_vks = (VK_LMENU, VK_RMENU, VK_LWIN, VK_RWIN)
+
     deadline = time.monotonic() + 0.25
     while time.monotonic() < deadline:
-        if not any((_user32.GetAsyncKeyState(vk) & 0x8000) != 0 for vk in monitored):
+        if not any((_user32.GetAsyncKeyState(vk) & 0x8000) != 0 for vk in side_non_ctrl):
             break
         time.sleep(0.015)
 
     release_events: list[tuple[int, int]] = []
-    for vk in (*monitored, VK_CONTROL, VK_LCONTROL, VK_RCONTROL):
+    needs_menu_mask = False
+    for vk in (*side_non_ctrl, *side_ctrl):
         if (_user32.GetAsyncKeyState(vk) & 0x8000) != 0:
+            if vk in alt_win_vks:
+                needs_menu_mask = True
             release_events.append((vk, KEYEVENTF_KEYUP))
     if release_events:
+        if needs_menu_mask:
+            release_events = [(_VK_MENU_MASK, 0), (_VK_MENU_MASK, KEYEVENTF_KEYUP), *release_events]
         _send_key_events(release_events)
         time.sleep(0.02)
 

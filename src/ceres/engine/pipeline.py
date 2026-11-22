@@ -1,4 +1,4 @@
-"""End-to-end orchestration connecting hotkeys, active context, audio capture, NPU AI models, and history."""
+"""End-to-end orchestration connecting hotkeys, audio capture, NPU AI models, and history."""
 
 from __future__ import annotations
 
@@ -18,7 +18,6 @@ from ceres.engine.rewriter import SentenceRewriter
 from ceres.engine.transcriber import WhisperTranscriber
 from ceres.history import HistoryEntry, HistoryStore
 from ceres.system.audio import AudioRecorder, play_cue, trim_silence
-from ceres.system.context import ActiveWindowContext, get_active_window_context
 from ceres.system.injector import TextInjector, set_clipboard_text
 
 logger = logging.getLogger(__name__)
@@ -33,7 +32,6 @@ class PipelineEvent:
     progress: float = 0.0
     entry: HistoryEntry | None = None
     device_summary: str = ""
-    app_context: str = "general"
     action_type: str = "dictate"
 
 
@@ -68,7 +66,6 @@ class DictationController:
         self._pending_action: str = "dictate"
         self._pending_selected_text: str | None = None
         self._pending_prior_clipboard: str | None = None
-        self._pending_context = ActiveWindowContext("", "", "general")
 
     @property
     def is_ready(self) -> bool:
@@ -100,7 +97,6 @@ class DictationController:
         *,
         progress: float = 0.0,
         entry: HistoryEntry | None = None,
-        app_context: str = "general",
         action_type: str = "dictate",
     ) -> None:
         self._state = state
@@ -114,7 +110,6 @@ class DictationController:
                     progress=progress,
                     entry=entry,
                     device_summary=self.device_summary,
-                    app_context=app_context,
                     action_type=action_type,
                 )
             )
@@ -187,7 +182,7 @@ class DictationController:
                 self._loading = False
 
     def start_listening(self, action: str = "dictate") -> bool:
-        """Capture active window context (and selected text for Voice Edit) then start mic capture."""
+        """Capture selected text for Voice Edit (if requested) and start microphone capture."""
         with self._workflow_lock:
             if self.recorder.is_recording:
                 return True
@@ -196,8 +191,6 @@ class DictationController:
                 return False
 
             cfg = self.config_manager.config
-            ctx = get_active_window_context()
-            effective_ctx = ctx.category if cfg.context_aware_style else "general"
 
             selected_text: str | None = None
             prior_clip: str | None = None
@@ -210,7 +203,6 @@ class DictationController:
             self._pending_action = action
             self._pending_selected_text = selected_text
             self._pending_prior_clipboard = prior_clip
-            self._pending_context = ctx
 
             try:
                 self.recorder.start(device=cfg.audio_device)
@@ -224,7 +216,7 @@ class DictationController:
             if cfg.play_chime:
                 play_cue("start")
             msg = "Speak edit instruction..." if action == "edit" else "Listening..."
-            self._emit("listening", msg, app_context=effective_ctx, action_type=action)
+            self._emit("listening", msg, action_type=action)
             return True
 
     def cancel_listening(self) -> None:
@@ -252,7 +244,6 @@ class DictationController:
             action = self._pending_action
             selected_text = self._pending_selected_text
             prior_clip = self._pending_prior_clipboard
-            ctx = self._pending_context
             self._pending_action = "dictate"
             self._pending_selected_text = None
             self._pending_prior_clipboard = None
@@ -262,7 +253,7 @@ class DictationController:
 
         threading.Thread(
             target=self._process_audio,
-            args=(audio, total_duration, action, selected_text, prior_clip, ctx),
+            args=(audio, total_duration, action, selected_text, prior_clip),
             name="CeresInferenceWorker",
             daemon=True,
         ).start()
@@ -274,23 +265,20 @@ class DictationController:
         action: str,
         selected_text: str | None,
         prior_clip: str | None,
-        ctx: ActiveWindowContext,
     ) -> None:
         with self._workflow_lock:
             cfg = self.config_manager.config
-            effective_ctx = ctx.category if cfg.context_aware_style else "general"
             trimmed, has_speech = trim_silence(audio)
             if not has_speech:
                 if prior_clip is not None:
                     set_clipboard_text(prior_clip)
-                self._emit("ready", "No speech detected", app_context=effective_ctx, action_type=action)
+                self._emit("ready", "No speech detected", action_type=action)
                 return
 
             try:
                 self._emit(
                     "transcribing",
                     f"Transcribing on {self.transcriber.active_device}...",
-                    app_context=effective_ctx,
                     action_type=action,
                 )
                 t0 = time.perf_counter()
@@ -300,7 +288,7 @@ class DictationController:
                 if not raw_text:
                     if prior_clip is not None:
                         set_clipboard_text(prior_clip)
-                    self._emit("ready", "No speech recognized", app_context=effective_ctx, action_type=action)
+                    self._emit("ready", "No speech recognized", action_type=action)
                     return
 
                 llm_ms = 0
@@ -308,7 +296,6 @@ class DictationController:
                     self._emit(
                         "rewriting",
                         f"Editing text on {self.rewriter.active_device}...",
-                        app_context=effective_ctx,
                         action_type="edit",
                     )
                     t1 = time.perf_counter()
@@ -325,7 +312,6 @@ class DictationController:
                     self._emit(
                         "rewriting",
                         f"Polishing text on {self.rewriter.active_device}...",
-                        app_context=effective_ctx,
                         action_type="dictate",
                     )
                     t1 = time.perf_counter()
@@ -334,7 +320,6 @@ class DictationController:
                         raw_text,
                         mode=cfg.rewrite_mode,
                         language_hint=lang_hint,
-                        app_context=effective_ctx,
                         vocabulary=cfg.custom_vocabulary,
                     )
                     llm_ms = int((time.perf_counter() - t1) * 1000)
@@ -356,7 +341,6 @@ class DictationController:
                     stt_ms=stt_ms,
                     llm_ms=llm_ms,
                     device_summary=self.device_summary,
-                    app_context=effective_ctx,
                     action_type=action,
                 )
                 done_msg = (
@@ -364,7 +348,7 @@ class DictationController:
                     if action == "edit" and cfg.auto_paste
                     else ("Pasted ✓" if cfg.auto_paste else "Copied ✓")
                 )
-                self._emit("done", done_msg, entry=entry, app_context=effective_ctx, action_type=action)
+                self._emit("done", done_msg, entry=entry, action_type=action)
             except Exception as exc:
                 logger.exception("Dictation processing failed: %s", exc)
                 if prior_clip is not None:
@@ -385,7 +369,6 @@ class DictationController:
                 entry.raw_text,
                 mode=target_mode,
                 language_hint=lang_hint,
-                app_context=entry.app_context,
                 vocabulary=cfg.custom_vocabulary,
             )
         llm_ms = int((time.perf_counter() - t0) * 1000)
@@ -398,10 +381,7 @@ class DictationController:
             stt_ms=entry.stt_ms,
             llm_ms=llm_ms,
             device_summary=self.device_summary,
-            app_context=entry.app_context,
             action_type="dictate",
         )
-        self._emit(
-            "done", "Re-polished ✓", entry=new_entry, app_context=entry.app_context, action_type="dictate"
-        )
+        self._emit("done", "Re-polished ✓", entry=new_entry, action_type="dictate")
         return new_entry

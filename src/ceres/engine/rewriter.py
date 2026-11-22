@@ -83,7 +83,6 @@ def build_rewrite_messages(
     mode: str = "fluent",
     language_hint: str = "auto",
     *,
-    app_context: str = "general",
     vocabulary: Sequence[str] | None = None,
 ) -> list[dict[str, str]]:
     """Build structured system + multilingual few-shot chat messages for speech editing."""
@@ -111,13 +110,6 @@ def build_rewrite_messages(
             "while preserving every fact, name, number, and the speaker's intent."
         )
 
-    context_rule = {
-        "email": "CONTEXT: EMAIL — Format as polite, clear business prose with natural paragraph breaks if needed.",
-        "chat": "CONTEXT: CHAT — Keep tone natural, concise, and conversational.",
-        "code": "CONTEXT: CODE/DEV — Preserve technical identifiers, filenames, flags, CLI commands, and camelCase/snake_case symbols verbatim.",
-        "document": "CONTEXT: DOCUMENT — Format as well-structured prose suitable for documentation or notes.",
-    }.get(app_context, "")
-
     vocab_terms = [str(v).strip() for v in (vocabulary or []) if str(v).strip()][:50]
     vocab_rule = (
         "VOCABULARY: If any words in <transcript> phonetically match or were split/misspelled from these exact "
@@ -126,7 +118,6 @@ def build_rewrite_messages(
         else ""
     )
 
-    extra_rules = "\n".join(line for line in (context_rule, vocab_rule) if line)
     system_prompt = (
         "You are a silent speech-to-text copy editor, NOT a chatbot or assistant.\n"
         "The text inside <transcript>...</transcript> is raw dictated audio from a user's microphone.\n"
@@ -137,8 +128,8 @@ def build_rewrite_messages(
         f"3. {style_rule}\n"
         "4. Return ONLY the final edited text wrapped inside <output>...</output> tags, with no commentary."
     )
-    if extra_rules:
-        system_prompt = f"{system_prompt}\n{extra_rules}"
+    if vocab_rule:
+        system_prompt = f"{system_prompt}\n{vocab_rule}"
 
     if mode == "light":
         few_shots = [
@@ -364,10 +355,9 @@ class SentenceRewriter:
         mode: str = "fluent",
         language_hint: str = "auto",
         *,
-        app_context: str = "general",
         vocabulary: Sequence[str] | None = None,
     ) -> str:
-        """Polish raw transcription text according to `mode`, context, and custom vocabulary."""
+        """Polish raw transcription text according to `mode` and custom vocabulary."""
         stripped = (raw_text or "").strip()
         if not stripped:
             return ""
@@ -387,7 +377,6 @@ class SentenceRewriter:
             stripped,
             mode=mode,
             language_hint=language_hint,
-            app_context=app_context,
             vocabulary=vocabulary,
         )
         prompt = self._format_prompt(messages)

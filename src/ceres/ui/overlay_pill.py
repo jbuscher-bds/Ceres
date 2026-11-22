@@ -22,6 +22,12 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import QWidget
 
+from ceres.ui.theme import (
+    DARK_THEME,
+    FONT_FAMILIES,
+    ThemeTokens,
+)
+
 GWL_EXSTYLE = -20
 WS_EX_TOPMOST = 0x00000008
 WS_EX_TOOLWINDOW = 0x00000080
@@ -33,6 +39,8 @@ SWP_NOACTIVATE = 0x0010
 SWP_FRAMECHANGED = 0x0020
 HWND_TOPMOST = -1
 MONITOR_DEFAULTTONEAREST = 2
+WM_MOUSEACTIVATE = 0x0021
+MA_NOACTIVATE = 3
 
 
 class _MONITORINFOEXW(ctypes.Structure):
@@ -102,10 +110,12 @@ class FloatingMicPill(QWidget):
         *,
         saved_position: list[int] | None = None,
         on_position_changed: Callable[[list[int] | None], None] | None = None,
+        theme: ThemeTokens = DARK_THEME,
     ) -> None:
         super().__init__(None)
         self._saved_position: list[int] | None = list(saved_position) if saved_position else None
         self._on_position_changed = on_position_changed
+        self._tokens = theme
 
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint
@@ -178,6 +188,11 @@ class FloatingMicPill(QWidget):
         y = max(avail.top() + 12, avail.bottom() - self.height() - 24)
         self.move(x, y)
 
+    def set_theme(self, tokens: ThemeTokens) -> None:
+        """Apply updated Light/Dark WinUI 3 tokens and repaint."""
+        self._tokens = tokens
+        self.update()
+
     def set_audio_level(self, level: float, elapsed_s: float) -> None:
         """Update target waveform energy & elapsed seconds at up to 30 Hz cheaply."""
         self._target_level = max(0.0, min(1.0, float(level)))
@@ -188,20 +203,13 @@ class FloatingMicPill(QWidget):
         state: str,
         message: str,
         *,
-        app_context: str = "general",
         action_type: str = "dictate",
     ) -> None:
         """Transition pill visual state without activating or stealing keyboard focus."""
         self._hide_timer.stop()
         self._state = state
         self._message = message
-
-        if action_type == "edit":
-            self._badge = "EDIT"
-        elif app_context and app_context != "general":
-            self._badge = app_context.upper()
-        else:
-            self._badge = ""
+        self._badge = "EDIT" if action_type == "edit" else ""
 
         if state in ("idle", "unloaded"):
             self.hide()
@@ -211,6 +219,7 @@ class FloatingMicPill(QWidget):
             self._elapsed_s = 0.0
             self._target_level = 0.0
             self._reposition()
+            self._apply_noactivate_style()
             self.show()
             self._apply_noactivate_style()
 
@@ -222,6 +231,17 @@ class FloatingMicPill(QWidget):
             self._hide_timer.start(delay_ms)
 
         self.update()
+
+    def nativeEvent(self, event_type, message):  # noqa: N802, ANN001, ANN201
+        """Reject Win32 mouse activation so clicking or dragging the pill never steals focus."""
+        try:
+            if bytes(event_type) in (b"windows_generic_MSG", b"windows_dispatcher_MSG"):
+                msg = wintypes.MSG.from_address(int(message))
+                if msg.message == WM_MOUSEACTIVATE:
+                    return True, MA_NOACTIVATE
+        except Exception:
+            pass
+        return super().nativeEvent(event_type, message)
 
     def hideEvent(self, event) -> None:  # noqa: N802, ANN001
         self._anim_timer.stop()
@@ -275,24 +295,28 @@ class FloatingMicPill(QWidget):
     def paintEvent(self, event) -> None:  # noqa: N802, ANN001
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        t = self._tokens
 
         accent_hex = {
-            "listening": "#22C55E",
-            "transcribing": "#F59E0B",
-            "rewriting": "#F59E0B",
-            "done": "#38BDF8",
-            "error": "#EF4444",
-        }.get(self._state, "#3B82F6")
+            "listening": t.success,
+            "transcribing": t.caution,
+            "rewriting": t.caution,
+            "done": t.success,
+            "error": t.error_text,
+        }.get(self._state, t.accent)
         accent = QColor(accent_hex)
 
-        # Outer translucent pill surface with crisp border
+        # Windows 11 frosted surface matching active Light/Dark theme
         rect = QRectF(2.0, 2.0, self.width() - 4.0, self.height() - 4.0)
         radius = rect.height() / 2.0
 
-        painter.setBrush(QColor(17, 22, 31, 242))
-        border_col = QColor(accent)
-        border_col.setAlpha(155 if self._state == "listening" else 110)
-        painter.setPen(QPen(border_col, 1.5))
+        painter.setBrush(QColor(*t.pill_surface_rgba))
+        if self._state == "listening":
+            border_col = QColor(accent)
+            border_col.setAlpha(180 if t.is_dark else 160)
+        else:
+            border_col = QColor(t.pill_border_idle)
+        painter.setPen(QPen(border_col, 1.4))
         painter.drawRoundedRect(rect, radius, radius)
 
         # Pulsing status dot
@@ -300,7 +324,7 @@ class FloatingMicPill(QWidget):
         dot_center_y = self.height() / 2.0
         if self._state == "listening":
             halo = QColor(accent)
-            halo.setAlpha(65)
+            halo.setAlpha(60 if t.is_dark else 45)
             painter.setBrush(halo)
             painter.setPen(Qt.PenStyle.NoPen)
             halo_r = 8.0 + 4.0 * self._smooth_level
@@ -313,22 +337,27 @@ class FloatingMicPill(QWidget):
         # Status text
         if self._state == "listening":
             mins, secs = divmod(int(self._elapsed_s), 60)
-            prefix = "Edit" if self._badge == "EDIT" else "Listening"
-            status_text = f"{prefix}  {mins}:{secs:02d}"
+            status_text = f"Listening  {mins}:{secs:02d}"
         else:
             status_text = self._message
 
-        text_font = QFont("Segoe UI", 10, QFont.Weight.DemiBold)
+        text_font = QFont()
+        text_font.setFamilies(FONT_FAMILIES)
+        text_font.setPointSize(10)
+        text_font.setWeight(QFont.Weight.DemiBold)
         painter.setFont(text_font)
-        painter.setPen(QColor("#F1F5F9"))
+        painter.setPen(QColor(t.text_primary))
 
         bars_total_w = self.BAR_COUNT * 6 - 3
         bars_left = self.width() - 20.0 - bars_total_w
 
         text_left = 40.0
+        badge_font = QFont()
+        badge_font.setFamilies(FONT_FAMILIES)
+        badge_font.setPointSize(8)
+        badge_font.setWeight(QFont.Weight.Bold)
         badge_w = 0.0
         if self._badge:
-            badge_font = QFont("Segoe UI", 8, QFont.Weight.Bold)
             fm_badge = QFontMetrics(badge_font)
             badge_w = float(fm_badge.horizontalAdvance(self._badge) + 14)
 
@@ -338,17 +367,22 @@ class FloatingMicPill(QWidget):
         painter.drawText(text_rect, Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, elided)
 
         if self._badge:
-            badge_font = QFont("Segoe UI", 8, QFont.Weight.Bold)
             painter.setFont(badge_font)
             text_used = float(QFontMetrics(text_font).horizontalAdvance(elided))
             bx = text_left + text_used + 8.0
             bh = 20.0
             by = (self.height() - bh) / 2.0
             b_rect = QRectF(bx, by, badge_w, bh)
-            painter.setBrush(QColor(37, 99, 235, 70) if self._badge != "EDIT" else QColor(245, 158, 11, 70))
-            painter.setPen(QPen(QColor(accent), 1.0))
-            painter.drawRoundedRect(b_rect, 6.0, 6.0)
-            painter.setPen(QColor("#E2E8F0"))
+            if self._badge == "EDIT":
+                painter.setBrush(QColor(*t.pill_edit_bg_rgba))
+                painter.setPen(QPen(QColor(t.caution), 1.0))
+                painter.drawRoundedRect(b_rect, 6.0, 6.0)
+                painter.setPen(QColor(t.caution))
+            else:
+                painter.setBrush(QColor(*t.pill_badge_bg_rgba))
+                painter.setPen(QPen(QColor(t.pill_badge_border), 1.0))
+                painter.drawRoundedRect(b_rect, 6.0, 6.0)
+                painter.setPen(QColor(t.text_primary))
             painter.drawText(b_rect, Qt.AlignmentFlag.AlignCenter, self._badge)
 
         # Animated equalizer bars

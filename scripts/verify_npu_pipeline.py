@@ -111,7 +111,6 @@ def main() -> int:
             "en_correction",
             "en",
             "fluent",
-            "general",
             None,
             "Um so I was thinking like maybe we should uh push the release to Monday, wait no Tuesday morning, because yeah Friday is totally packed.",
             lambda out: (
@@ -122,7 +121,6 @@ def main() -> int:
             "en_question",
             "en",
             "fluent",
-            "email",
             None,
             "Uh can you tell me if the client already signed the contract?",
             lambda out: "?" in out and "signed" in out.lower(),
@@ -131,7 +129,6 @@ def main() -> int:
             "nl_correction",
             "nl",
             "fluent",
-            "chat",
             None,
             "Eh ik wilde zeg maar vragen of we de vergadering om drie uur, nee wacht om vier uur kunnen inplannen, want dan is iedereen erbij.",
             lambda out: "vier" in out.lower() and "drie" not in out.lower() and "vergadering" in out.lower(),
@@ -140,7 +137,6 @@ def main() -> int:
             "nl_light",
             "nl",
             "light",
-            "general",
             None,
             "Euh stuur mij straks nog even het nieuwe document door alsjeblieft.",
             lambda out: (
@@ -151,7 +147,6 @@ def main() -> int:
             "de_correction",
             "de",
             "fluent",
-            "general",
             None,
             "Ähm ich wollte nur kurz Bescheid sagen, dass wir halt morgen leider erst um neun, nein warte um zehn Uhr im Büro sind.",
             lambda out: (
@@ -164,7 +159,6 @@ def main() -> int:
             "de_question",
             "de",
             "fluent",
-            "general",
             None,
             "Äh kannst du mir bitte sagen, wann der Bericht fertig ist?",
             lambda out: "bericht" in out.lower() and "report" not in out.lower() and "?" in out,
@@ -173,18 +167,17 @@ def main() -> int:
             "code_vocab",
             "en",
             "fluent",
-            "code",
             ["OpenVINO", "PySide6", "jbuscher-bds"],
             "Um please check the open vino pipeline and update pi side six config for jay buscher bds.",
             lambda out: "OpenVINO" in out and "PySide6" in out and "jbuscher-bds" in out,
         ),
     ]
 
-    for name, lang, mode, ctx_cat, vocab, raw, check_fn in cases:
+    for name, lang, mode, vocab, raw, check_fn in cases:
         t_start = time.perf_counter()
-        out = llm.rewrite(raw, mode=mode, language_hint=lang, app_context=ctx_cat, vocabulary=vocab)
+        out = llm.rewrite(raw, mode=mode, language_hint=lang, vocabulary=vocab)
         ms = int((time.perf_counter() - t_start) * 1000)
-        print(f"\n[{name} | {lang.upper()} | {mode} | ctx={ctx_cat} | {ms} ms]")
+        print(f"\n[{name} | {lang.upper()} | {mode} | {ms} ms]")
         print(f"  RAW: {raw}")
         print(f"  OUT: {out}")
         assert check_fn(out), f"Quality assertion failed for {name}: {out!r}"
