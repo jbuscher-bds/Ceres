@@ -1,18 +1,26 @@
 from __future__ import annotations
 
+import ctypes
+
 import pytest
 
+from ceres.system import hotkey as hotkey_mod
 from ceres.system.hotkey import (
+    _KBDLLHOOKSTRUCT,
+    LLKHF_INJECTED,
     VK_ESCAPE,
     VK_LCONTROL,
     VK_LMENU,
     VK_LSHIFT,
     VK_SPACE,
+    WM_KEYDOWN,
+    WM_KEYUP,
     GlobalHotkeyManager,
     HotkeyStateMachine,
     format_hotkey_display,
     parse_hotkey,
 )
+from ceres.system.injector import CERES_INJECTED_EXTRA_INFO
 
 
 def test_parse_hotkey_variants() -> None:
@@ -116,3 +124,82 @@ def test_global_hotkey_manager_exact_modifiers_stale_recovery_and_suppression(mo
 
     assert mgr._handle_key_event(VK_ESCAPE, True) is False
     assert mgr._handle_key_event(VK_ESCAPE, False) is False
+
+
+def test_global_hotkey_manager_external_injected_macros_and_capture(monkeypatch) -> None:
+    mgr = GlobalHotkeyManager(hotkey="ctrl+shift+space", edit_hotkey="ctrl+shift+e", trigger_mode="hybrid")
+    monkeypatch.setattr(hotkey_mod._user32, "CallNextHookEx", lambda *_args: 0)
+    monkeypatch.setattr(mgr, "_is_vk_physically_down", lambda _vk: False)
+
+    def _send(vk: int, is_down: bool, *, flags: int = LLKHF_INJECTED, extra: int = 0) -> int:
+        kb = _KBDLLHOOKSTRUCT(vkCode=vk, scanCode=0, flags=flags, time=0, dwExtraInfo=extra)
+        w_param = WM_KEYDOWN if is_down else WM_KEYUP
+        return mgr._low_level_handler(0, w_param, ctypes.addressof(kb))
+
+    def _drain_events() -> list[tuple[str, object]]:
+        items: list[tuple[str, object]] = []
+        while not mgr._event_queue.empty():
+            items.append(mgr._event_queue.get_nowait())
+        return items
+
+    # 1. External injected shortcut (e.g. Logi Options+ MX Keys macro) starts and stops dictation
+    assert _send(VK_LCONTROL, True) == 0
+    assert _send(VK_LSHIFT, True) == 0
+    assert _send(VK_SPACE, True) == 1
+    assert _send(VK_SPACE, False) == 1
+    assert _send(VK_LSHIFT, False) == 0
+    assert _send(VK_LCONTROL, False) == 0
+    assert mgr._dictate_state.is_recording is True
+    assert _drain_events() == [("start", "dictate")]
+
+    assert _send(VK_LCONTROL, True) == 0
+    assert _send(VK_LSHIFT, True) == 0
+    assert _send(VK_SPACE, True) == 1
+    assert _send(VK_SPACE, False) == 1
+    assert _send(VK_LSHIFT, False) == 0
+    assert _send(VK_LCONTROL, False) == 0
+    assert mgr._dictate_state.is_recording is False
+    assert _drain_events() == [("stop", None)]
+
+    # 2. Ceres-tagged SendInput events are ignored completely and pruned on keyup
+    mgr._pressed_vks.add(VK_LCONTROL)
+    for vk in (VK_LCONTROL, VK_LSHIFT, VK_SPACE):
+        assert _send(vk, True, extra=CERES_INJECTED_EXTRA_INFO) == 0
+    for vk in (VK_SPACE, VK_LSHIFT, VK_LCONTROL):
+        assert _send(vk, False, extra=CERES_INJECTED_EXTRA_INFO) == 0
+    assert mgr._dictate_state.is_recording is False
+    assert VK_LCONTROL not in mgr._pressed_vks
+    assert _drain_events() == []
+
+    # 3. Interactive capture ignores plain letter 'f' alone, captures injected F13 and Ctrl+Shift+Space
+    captured: list[str] = []
+    mgr.start_recording_hotkey(captured.append)
+
+    assert _send(ord("F"), True) == 1
+    assert _send(ord("F"), False) == 1
+    assert _drain_events() == []
+
+    assert _send(0x7C, True) == 1  # VK_F13
+    assert _send(0x7C, False) == 1
+    events = _drain_events()
+    assert len(events) == 1
+    kind, payload = events[0]
+    assert kind == "captured"
+    cb, spec = payload  # type: ignore[misc]
+    cb(spec)
+    assert captured == ["f13"]
+
+    mgr.start_recording_hotkey(captured.append)
+    assert _send(VK_LCONTROL, True) == 0
+    assert _send(VK_LSHIFT, True) == 0
+    assert _send(VK_SPACE, True) == 1
+    assert _send(VK_SPACE, False) == 1
+    assert _send(VK_LSHIFT, False) == 0
+    assert _send(VK_LCONTROL, False) == 0
+    events = _drain_events()
+    assert len(events) == 1
+    kind, payload = events[0]
+    assert kind == "captured"
+    cb, spec = payload  # type: ignore[misc]
+    cb(spec)
+    assert captured == ["f13", "ctrl+shift+space"]

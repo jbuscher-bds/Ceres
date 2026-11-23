@@ -30,6 +30,7 @@ VK_RMENU = 0xA5
 VK_C = 0x43
 VK_V = 0x56
 _VK_MENU_MASK = 0xE8  # Unassigned VK to prevent Alt/Win keyup from activating menu bar
+CERES_INJECTED_EXTRA_INFO = 0x43455245  # "CERE" tag to identify Ceres-originated SendInput events
 
 
 class _MOUSEINPUT(ctypes.Structure):
@@ -179,7 +180,13 @@ def _send_key_events(events: list[tuple[int, int]]) -> int:
     arr = (_INPUT * len(events))()
     for idx, (vk, flags) in enumerate(events):
         arr[idx].type = INPUT_KEYBOARD
-        arr[idx].union.ki = _KEYBDINPUT(wVk=vk, wScan=0, dwFlags=flags, time=0, dwExtraInfo=0)
+        arr[idx].union.ki = _KEYBDINPUT(
+            wVk=vk,
+            wScan=0,
+            dwFlags=flags,
+            time=0,
+            dwExtraInfo=CERES_INJECTED_EXTRA_INFO,
+        )
     return int(_user32.SendInput(len(events), arr, ctypes.sizeof(_INPUT)))
 
 

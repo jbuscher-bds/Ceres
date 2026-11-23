@@ -11,6 +11,8 @@ import time
 from collections.abc import Callable
 from typing import Any
 
+from ceres.system.injector import CERES_INJECTED_EXTRA_INFO
+
 logger = logging.getLogger(__name__)
 
 # Windows hook constants
@@ -183,6 +185,10 @@ for _d in "0123456789":
     _VK_TO_KEY_NAME[ord(_d)] = _d
 
 MODIFIER_ORDER = ("ctrl", "alt", "shift", "win")
+
+
+def _is_function_key(name: str) -> bool:
+    return len(name) >= 2 and name.startswith("f") and name[1:].isdigit()
 
 
 def vk_to_name(vk_code: int) -> str | None:
@@ -499,12 +505,20 @@ class GlobalHotkeyManager:
     def _is_vk_physically_down(self, vk: int) -> bool:
         return (_user32.GetAsyncKeyState(vk) & 0x8000) != 0
 
-    def _active_modifiers(self, current_vk: int | None = None, is_down: bool = False) -> set[str]:
+    def _active_modifiers(
+        self,
+        current_vk: int | None = None,
+        is_down: bool = False,
+        *,
+        is_injected: bool = False,
+    ) -> set[str]:
         mods: set[str] = set()
         for mod_name, vks in MODIFIER_CHECK_VKS.items():
-            if any(self._is_vk_physically_down(vk) for vk in vks):
+            physically_down = any(self._is_vk_physically_down(vk) for vk in vks)
+            tracked_down = is_injected and any(vk in self._pressed_vks for vk in vks)
+            if physically_down or tracked_down:
                 mods.add(mod_name)
-            else:
+            elif not is_injected:
                 for vk in vks:
                     self._pressed_vks.discard(vk)
         if current_vk is not None and current_vk in MODIFIER_VKS:
@@ -521,8 +535,14 @@ class GlobalHotkeyManager:
         trigger_key: str | None,
         current_vk: int,
         is_down: bool,
+        *,
+        is_injected: bool = False,
     ) -> bool:
-        mods = self._active_modifiers(current_vk=current_vk, is_down=is_down)
+        mods = self._active_modifiers(
+            current_vk=current_vk,
+            is_down=is_down,
+            is_injected=is_injected,
+        )
         if mods != req_mods:
             return False
         if trigger_key is None:
@@ -566,17 +586,19 @@ class GlobalHotkeyManager:
             vk = int(kb.vkCode)
             is_down = w_param in (WM_KEYDOWN, WM_SYSKEYDOWN)
             is_up = w_param in (WM_KEYUP, WM_SYSKEYUP)
-            if (kb.flags & LLKHF_INJECTED) != 0:
+            is_injected = (kb.flags & LLKHF_INJECTED) != 0
+            is_ceres_injected = is_injected and int(kb.dwExtraInfo) == CERES_INJECTED_EXTRA_INFO
+            if is_ceres_injected:
                 if is_up:
                     with self._lock:
                         self._pressed_vks.discard(vk)
             elif is_down or is_up:
-                suppress = self._handle_key_event(vk, is_down)
+                suppress = self._handle_key_event(vk, is_down, is_injected=is_injected)
         if suppress:
             return 1
         return _user32.CallNextHookEx(self._hook_handle, n_code, w_param, l_param)
 
-    def _handle_key_event(self, vk: int, is_down: bool) -> bool:
+    def _handle_key_event(self, vk: int, is_down: bool, *, is_injected: bool = False) -> bool:
         now = time.monotonic()
         with self._lock:
             if is_down:
@@ -602,9 +624,11 @@ class GlobalHotkeyManager:
                     if name in MODIFIER_ORDER:
                         self._capture_mods.add(name)
                         return False
-                    self._capture_mods.update(self._active_modifiers(current_vk=vk, is_down=True))
+                    self._capture_mods.update(
+                        self._active_modifiers(current_vk=vk, is_down=True, is_injected=is_injected)
+                    )
                     self._capture_key = name
-                    if self._capture_mods or name.startswith("f"):
+                    if self._capture_mods or _is_function_key(name):
                         spec = format_hotkey(self._capture_mods, self._capture_key)
                         cb = self._capture_callback
                         self.cancel_recording_hotkey()
@@ -616,7 +640,7 @@ class GlobalHotkeyManager:
                     and self._capture_mods
                     and self._capture_key is None
                     and len(self._capture_mods) >= 2
-                    and not self._active_modifiers(current_vk=vk, is_down=False)
+                    and not self._active_modifiers(current_vk=vk, is_down=False, is_injected=is_injected)
                 ):
                     # Allow modifier-only combinations (e.g., Ctrl+Win) on release
                     spec = format_hotkey(self._capture_mods, None)
@@ -633,8 +657,20 @@ class GlobalHotkeyManager:
                     return True
                 return False
 
-            dictate_now = self._is_combo_active(self._dictate_modifiers, self._dictate_trigger, vk, is_down)
-            edit_now = self._is_combo_active(self._edit_modifiers, self._edit_trigger, vk, is_down)
+            dictate_now = self._is_combo_active(
+                self._dictate_modifiers,
+                self._dictate_trigger,
+                vk,
+                is_down,
+                is_injected=is_injected,
+            )
+            edit_now = self._is_combo_active(
+                self._edit_modifiers,
+                self._edit_trigger,
+                vk,
+                is_down,
+                is_injected=is_injected,
+            )
             dictate_trigger_vk = _KEY_NAME_TO_VK.get(self._dictate_trigger) if self._dictate_trigger else None
             edit_trigger_vk = _KEY_NAME_TO_VK.get(self._edit_trigger) if self._edit_trigger else None
             suppress_trigger = (
